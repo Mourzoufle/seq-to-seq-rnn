@@ -1,7 +1,5 @@
-﻿import sys
-import time
+﻿import time
 import numpy
-import cPickle
 from collections import OrderedDict
 from theano import tensor
 from theano import config
@@ -60,55 +58,20 @@ def get_minibatches_idx(n, minibatch_size, shuffle=False):
 	return zip(range(len(minibatches)), minibatches)
 
 
-def load_params(path, params):
-	pp = numpy.load(path)
-	for kk, vv in params.items():
-		if kk not in pp:
-			raise Warning('%s is not in the archive' % kk)
-		params[kk] = pp[kk]
-
-	return params
-
-
-def init_tparams(params):
-	tparams = OrderedDict()
+def init_tparams(params, tparams):
 	for kk, pp in params.items():
 		tparams[kk] = theano.shared(params[kk], name=kk)
-
-	return tparams
 
 
 def norm_weight(ndim_in, ndim_out, scale=0.01):
 	return scale * numpy.random.randn(ndim_in, ndim_out).astype(config.floatX)
 
 
-def init_param_lstm(params, ndim_in, ndim_out, prefix):
-	"""
-	Initialize parameters of a LSTM layer
-	"""
-	params[concat(prefix, 'W')] = numpy.concatenate([norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out)], axis=1)
-	params[concat(prefix, 'U')] = numpy.concatenate([norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out)], axis=1)
-	params[concat(prefix, 'b')] = numpy.zeros((4 * ndim_out,)).astype(config.floatX)
-
-	return params
+def layer_dropout(state_before, dropout, trng):
+	return tensor.switch(dropout, (state_before * trng.binomial(state_before.shape, p=0.5, n=1, dtype=state_before.dtype)), state_before * 0.5)
 
 
-def init_param_gru(params, ndim_in, ndim_out, prefix):
-	"""
-	Initialize parameters of a GRU layer
-	"""
-	params[concat(prefix, 'W')] = numpy.concatenate([norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out)], axis=1)
-	params[concat(prefix, 'U')] = numpy.concatenate([norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out)], axis=1)
-	params[concat(prefix, 'b')] = numpy.zeros((3 * ndim_out,)).astype(config.floatX)
-
-	return params
-
-
-def layer_dropout(state_before, use_noise, trng):
-	return tensor.switch(use_noise, (state_before * trng.binomial(state_before.shape, p=0.5, n=1, dtype=state_before.dtype)), state_before * 0.5)
-
-
-def layer_lstm(mask, state_below, tparams, ndim_out, prefix):
+def layer_lstm(mask, state_below, tparams, ndim_in, ndim_out, prefix, init):
 	"""
 	LSTM layer
 	"""
@@ -126,7 +89,14 @@ def layer_lstm(mask, state_below, tparams, ndim_out, prefix):
 		h = m_[:, None] * h + (1. - m_)[:, None] * h_
 
 		return h, c
-	
+
+	if init:
+		params = OrderedDict()
+		params[concat(prefix, 'W')] = numpy.concatenate([norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out)], axis=1)
+		params[concat(prefix, 'U')] = numpy.concatenate([norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out)], axis=1)
+		params[concat(prefix, 'b')] = numpy.zeros((4 * ndim_out,)).astype(config.floatX)
+		init_tparams(params, tparams)
+
 	nsteps = state_below.shape[0]
 	nsamples = state_below.shape[1] if state_below.ndim == 3 else 1
 	state_below = (tensor.dot(state_below, tparams[concat(prefix, 'W')]) + tparams[concat(prefix, 'b')])
@@ -135,7 +105,7 @@ def layer_lstm(mask, state_below, tparams, ndim_out, prefix):
 	return rval[0]
 
 
-def layer_gru(mask, state_below, tparams, ndim_out, prefix):
+def layer_gru(mask, state_below, tparams, ndim_in, ndim_out, prefix, init):
 	"""
 	GRU layer
 	"""
@@ -149,7 +119,14 @@ def layer_gru(mask, state_below, tparams, ndim_out, prefix):
 		h = m_[:, None] * h + (1. - m_)[:, None] * h_
 
 		return h
-	
+
+	if init:
+		params = OrderedDict()
+		params[concat(prefix, 'W')] = numpy.concatenate([norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out), norm_weight(ndim_in, ndim_out)], axis=1)
+		params[concat(prefix, 'U')] = numpy.concatenate([norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out), norm_weight(ndim_out, ndim_out)], axis=1)
+		params[concat(prefix, 'b')] = numpy.zeros((3 * ndim_out,)).astype(config.floatX)
+		init_tparams(params, tparams)
+
 	nsteps = state_below.shape[0]
 	nsamples = state_below.shape[1] if state_below.ndim == 3 else 1
 	state_below = (tensor.dot(state_below, tparams[concat(prefix, 'W')]) + tparams[concat(prefix, 'b')])
@@ -158,7 +135,7 @@ def layer_gru(mask, state_below, tparams, ndim_out, prefix):
 	return rval
 
 
-def sgd(lr, tparams, grads, x, mask, y, cost):
+def sgd(lr, tparams, grads, x, mask_x, y, mask_y, cost):
 	"""
 	Stochastic Gradient Descent
 
@@ -166,16 +143,18 @@ def sgd(lr, tparams, grads, x, mask, y, cost):
 	----------
 	lr: Theano SharedVariable
 		Initial learning rate
-	tpramas: Theano SharedVariable
+	tparams: Theano SharedVariable
 		Model parameters
 	grads: Theano variable
 		Gradients of cost w.r.t to parameres
 	x: Theano variable
 		Model inputs
-	mask: Theano variable
+	mask_x: Theano variable
 		Sequence mask
 	y: Theano variable
 		Targets
+	mask_y: Theano variable
+		Sequence mask
 	cost: Theano variable
 		Objective fucntion to minimize
 
@@ -186,7 +165,7 @@ def sgd(lr, tparams, grads, x, mask, y, cost):
 	gsup = [(gs, g) for gs, g in zip(gshared, grads)]
 
 	# Function that computes gradients for a mini-batch, but do not updates the weights.
-	f_grad_shared = theano.function([x, mask, y], cost, updates=gsup, name='sgd_f_grad_shared')
+	f_grad_shared = theano.function([x, mask_x, y, mask_y], cost, updates=gsup, name='sgd_f_grad_shared')
 	pup = [(p, p - lr * g) for p, g in zip(tparams.values(), gshared)]
 
 	# Function that updates the weights from the previously computed gradient.
@@ -195,7 +174,7 @@ def sgd(lr, tparams, grads, x, mask, y, cost):
 	return f_grad_shared, f_update
 
 
-def adadelta(lr, tparams, grads, x, mask, y, cost):
+def adadelta(lr, tparams, grads, x, mask_x, y, mask_y, cost):
 	"""
 	An adaptive learning rate optimizer
 
@@ -203,16 +182,18 @@ def adadelta(lr, tparams, grads, x, mask, y, cost):
 	----------
 	lr: Theano SharedVariable
 		Initial learning rate
-	tpramas: Theano SharedVariable
+	tparams: Theano SharedVariable
 		Model parameters
 	grads: Theano variable
 		Gradients of cost w.r.t. to parameres
 	x: Theano variable
 		Model inputs
-	mask: Theano variable
+	mask_x: Theano variable
 		Sequence mask
 	y: Theano variable
 		Targets
+	mask_y: Theano variable
+		Sequence mask
 	cost: Theano variable
 		Objective fucntion to minimize
 
@@ -225,7 +206,7 @@ def adadelta(lr, tparams, grads, x, mask, y, cost):
 	zgup = [(zg, g) for zg, g in zip(zipped_grads, grads)]
 	rg2up = [(rg2, 0.95 * rg2 + 0.05 * (g ** 2)) for rg2, g in zip(running_grads2, grads)]
 
-	f_grad_shared = theano.function([x, mask, y], cost, updates=zgup + rg2up, name='adadelta_f_grad_shared')
+	f_grad_shared = theano.function([x, mask_x, y, mask_y], cost, updates=zgup + rg2up, name='adadelta_f_grad_shared')
 	updir = [-tensor.sqrt(ru2 + 1e-6) / tensor.sqrt(rg2 + 1e-6) * zg for zg, ru2, rg2 in zip(zipped_grads, running_up2, running_grads2)]
 	ru2up = [(ru2, 0.95 * ru2 + 0.05 * (ud ** 2)) for ru2, ud in zip(running_up2, updir)]
 	param_up = [(p, p + ud) for p, ud in zip(tparams.values(), updir)]
@@ -235,7 +216,7 @@ def adadelta(lr, tparams, grads, x, mask, y, cost):
 	return f_grad_shared, f_update
 
 
-def rmsprop(lr, tparams, grads, x, mask, y, cost):
+def rmsprop(lr, tparams, grads, x, mask_x, y, mask_y, cost):
 	"""
 	A variant of SGD that scales the step size by running average of the recent step norms.
 
@@ -243,16 +224,18 @@ def rmsprop(lr, tparams, grads, x, mask, y, cost):
 	----------
 	lr: Theano SharedVariable
 		Initial learning rate
-	tpramas: Theano SharedVariable
+	tparams: Theano SharedVariable
 		Model parameters
 	grads: Theano variable
 		Gradients of cost w.r.t to parameres
 	x: Theano variable
 		Model inputs
-	mask: Theano variable
+	mask_x: Theano variable
 		Sequence mask
 	y: Theano variable
 		Targets
+	mask_y: Theano variable
+		Sequence mask
 	cost: Theano variable
 		Objective fucntion to minimize
 
@@ -266,7 +249,7 @@ def rmsprop(lr, tparams, grads, x, mask, y, cost):
 	rgup = [(rg, 0.95 * rg + 0.05 * g) for rg, g in zip(running_grads, grads)]
 	rg2up = [(rg2, 0.95 * rg2 + 0.05 * (g ** 2)) for rg2, g in zip(running_grads2, grads)]
 
-	f_grad_shared = theano.function([x, mask, y], cost, updates=zgup + rgup + rg2up, name='rmsprop_f_grad_shared')
+	f_grad_shared = theano.function([x, mask_x, y, mask_y], cost, updates=zgup + rgup + rg2up, name='rmsprop_f_grad_shared')
 	updir = [theano.shared(p.get_value() * numpy_floatX(0.), name='%s_updir' % k) for k, p in tparams.items()]
 	updir_new = [(ud, 0.9 * ud - 1e-4 * zg / tensor.sqrt(rg2 - rg ** 2 + 1e-4)) for ud, zg, rg, rg2 in zip(updir, zipped_grads, running_grads, running_grads2)]
 	param_up = [(p, p + udn[1]) for p, udn in zip(tparams.values(), updir_new)]
@@ -276,36 +259,35 @@ def rmsprop(lr, tparams, grads, x, mask, y, cost):
 	return f_grad_shared, f_update
 
 
-def build_model(tparams, options):
+def build_model(tparams, ndim_x, ndim_y, ndim_enc, ndim_dec, path_load):
 	"""
 	Build the whole model
 	"""
 	trng = MRG_RandomStreams(SEED)
+	# Used for dropout
+	dropout = theano.shared(numpy_floatX(0.))
+	x = tensor.tensor3('x', dtype=config.floatX)
+	mask_x = tensor.matrix('mask_x', dtype='int8')
+	y = tensor.tensor3('y', dtype='int8')
+	mask_y = tensor.matrix('mask_y', dtype='int8')
 
-	# Used for dropout.
-	use_noise = theano.shared(numpy_floatX(0.))
+	tparams = OrderedDict()
+	if path_load:
+		init_tparams(numpy.load(path_load), tparams)
+	else:
+		tparams['fc_U'] = theano.shared(norm_weight(ndim_dec, ndim_y))
+		tparams['fc_b'] = theano.shared(numpy.zeros((ndim_y,)).astype(config.floatX))
 
-	x = tensor.matrix('x', dtype='int64')
-	mask = tensor.matrix('mask', dtype=config.floatX)
-	y = tensor.vector('y', dtype='int64')
+	encoder_1 = layer_gru(mask_x, x, tparams, ndim_x, ndim_enc, prefix='encoder_1', path_load is None)[-1]
+	encoder_1 = tensor.repeat(encoder_1.dimshuffle('x', 0, 1), y.shape[0], axis=0)
+	decoder_1 = layer_gru(mask_y, encoder_1, tparams, ndim_enc, ndim_dec, prefix='decoder_1', path_load is None)
+	fc = tensor.dot(proj, tparams['fc_U']) + tparams['fc_b']
+	
+	pred = tensor.exp(fc - tensor.max(fc, axis=-1, keepdims=True))
+	pred /= tensor.sum(pred, axis=-1, keepdims=True)
 
-	n_timesteps = x.shape[0]
-	n_samples = x.shape[1]
-
-	emb = tparams['Wemb'][x.flatten()].reshape([n_timesteps,
-												n_samples,
-												options['dim_proj']])
-	proj = lstm_layer(tparams, emb, options, prefix=options['encoder'], mask=mask)
-	if options['encoder'] == 'lstm':
-		proj = (proj * mask[:, :, None]).sum(axis=0)
-		proj = proj / mask.sum(axis=0)[:, None]
-	if options['use_dropout']:
-		proj = dropout_layer(proj, use_noise, trng)
-
-	pred = tensor.nnet.softmax(tensor.dot(proj, tparams['U']) + tparams['b'])
-
-	f_pred_prob = theano.function([x, mask], pred, name='f_pred_prob')
-	f_pred = theano.function([x, mask], pred.argmax(axis=1), name='f_pred')
+	f_pred_prob = theano.function([x, mask_x, mask_y], pred, name='f_pred_prob')
+	f_pred = theano.function([x, mask_x, mask_y], pred.argmax(axis=1), name='f_pred')
 
 	off = 1e-8
 	if pred.dtype == 'float16':
@@ -313,7 +295,7 @@ def build_model(tparams, options):
 
 	cost = -tensor.log(pred[tensor.arange(n_samples), y] + off).mean()
 
-	return use_noise, x, mask, y, f_pred_prob, f_pred, cost
+	return dropout, x, mask_x, y, mask_y, f_pred_prob, f_pred, cost
 
 
 def pred_probs(f_pred_prob, prepare_data, data, iterator, verbose=False):
@@ -407,22 +389,13 @@ def train_lstm(
 	print('Building model')
 	# This create the initial parameters as numpy ndarrays.
 	# Dict name (string) -> numpy ndarray
-	params = OrderedDict()
-
-	# classifier
-	params['U'] = 0.01 * numpy.random.randn(options['dim_proj'], options['ydim']).astype(config.floatX)
-	params['b'] = numpy.zeros((options['ydim'],)).astype(config.floatX)
-
-	if reload_model:
-		load_params('lstm_model.npz', params)
-
 	# This create Theano Shared Variable from the parameters.
 	# Dict name (string) -> Theano Tensor Shared Variable
 	# params and tparams have different copy of the weights.
 	tparams = init_tparams(params)
 
-	# use_noise is for dropout
-	(use_noise, x, mask,
+	# dropout is for dropout
+	(dropout, x, mask,
 	 y, f_pred_prob, f_pred, cost) = build_model(tparams, model_options)
 
 	if decay_c > 0.:
@@ -471,7 +444,7 @@ def train_lstm(
 
 			for _, train_index in kf:
 				uidx += 1
-				use_noise.set_value(1.)
+				dropout.set_value(1.)
 
 				# Select the random examples for this minibatch
 				y = [train[1][t] for t in train_index]
@@ -505,7 +478,7 @@ def train_lstm(
 					print('Done')
 
 				if numpy.mod(uidx, validFreq) == 0:
-					use_noise.set_value(0.)
+					dropout.set_value(0.)
 					train_err = pred_error(f_pred, prepare_data, train, kf)
 					valid_err = pred_error(f_pred, prepare_data, valid,
 										   kf_valid)
@@ -546,7 +519,7 @@ def train_lstm(
 	else:
 		best_p = unzip(tparams)
 
-	use_noise.set_value(0.)
+	dropout.set_value(0.)
 	kf_train_sorted = get_minibatches_idx(len(train[0]), batch_size)
 	train_err = pred_error(f_pred, prepare_data, train, kf_train_sorted)
 	valid_err = pred_error(f_pred, prepare_data, valid, kf_valid)
