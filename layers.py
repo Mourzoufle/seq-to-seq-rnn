@@ -35,18 +35,18 @@ def _init_weight(n_dim_in, n_dim_out, scale=0.01):
     return scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX)
 
 
-def dropout(state_before, use_dropout, trng):
+def dropout(state_in, use_dropout, trng, ratio=0.5):
     '''
     Dropout layer
     '''
-    return tensor.switch(use_dropout, (state_before * trng.binomial(state_before.shape, p=0.5, n=1, dtype=state_before.dtype)), state_before * 0.5)
+    return tensor.switch(use_dropout, (state_in * trng.binomial(state_in.shape, p=ratio, n=1, dtype=state_in.dtype)), state_in * ratio)
 
 
-def dense(state_in, t_params, n_dim_in, n_dim_out, prefix, init):
+def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Full-connected layer
     '''
-    if init:
+    if not t_params.has_key(_concat(prefix, 'b')):
         params = OrderedDict()
         params[_concat(prefix, 'W')] = _init_weight(n_dim_in, n_dim_out)
         params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,)).astype(config.floatX)
@@ -55,16 +55,7 @@ def dense(state_in, t_params, n_dim_in, n_dim_out, prefix, init):
     return tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')]
 
 
-def softmax(state_in):
-    '''
-    Softmax layer
-    '''
-    state_out = tensor.exp(state_in - state_in.max(axis=-1, keepdims=True))
-
-    return state_out / state_out.sum(axis=-1, keepdims=True)
-
-
-def gru(mask, state_below, t_params, n_dim_in, n_dim_out, prefix, init):
+def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Gated Recurrent Unit (GRU) layer
     '''
@@ -80,22 +71,22 @@ def gru(mask, state_below, t_params, n_dim_in, n_dim_out, prefix, init):
 
         return _h_new
 
-    if init:
+    if not t_params.has_key(_concat(prefix, 'b')):
         params = OrderedDict()
         params[_concat(prefix, 'W')] = numpy.concatenate([_init_weight(n_dim_in, n_dim_out), _init_weight(n_dim_in, n_dim_out), _init_weight(n_dim_in, n_dim_out)], axis=1)
         params[_concat(prefix, 'U')] = numpy.concatenate([_init_weight(n_dim_out, n_dim_out), _init_weight(n_dim_out, n_dim_out), _init_weight(n_dim_out, n_dim_out)], axis=1)
         params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,)).astype(config.floatX)
         init_t_params(params, t_params)
 
-    n_steps = state_below.shape[0]
-    n_samples = state_below.shape[1] if state_below.ndim == 3 else 1
-    state_below = (tensor.dot(state_below, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
-    rval, _ = theano.scan(_step, sequences=[mask, state_below], outputs_info=[tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], name=_concat(prefix, '_layer'), n_steps=n_steps)
+    n_steps = state_in.shape[0]
+    n_samples = state_in.shape[1] if state_in.ndim == 3 else 1
+    state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
+    rval, _ = theano.scan(_step, sequences=[mask, state_in], outputs_info=[tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], name=_concat(prefix, '_layer'), n_steps=n_steps)
 
     return rval
 
 
-def lstm(mask, state_below, t_params, n_dim_in, n_dim_out, prefix, init):
+def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Long Short-Term Memory (LSTM) layer
     '''
@@ -113,16 +104,16 @@ def lstm(mask, state_below, t_params, n_dim_in, n_dim_out, prefix, init):
 
         return _h_new, _c_new
 
-    if init:
+    if not t_params.has_key(_concat(prefix, 'b')):
         params = OrderedDict()
         params[_concat(prefix, 'W')] = numpy.concatenate([_init_weight(n_dim_in, n_dim_out), _init_weight(n_dim_in, n_dim_out), _init_weight(n_dim_in, n_dim_out), _init_weight(n_dim_in, n_dim_out)], axis=1)
         params[_concat(prefix, 'U')] = numpy.concatenate([_init_weight(n_dim_out, n_dim_out), _init_weight(n_dim_out, n_dim_out), _init_weight(n_dim_out, n_dim_out), _init_weight(n_dim_out, n_dim_out)], axis=1)
         params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,)).astype(config.floatX)
         init_t_params(params, t_params)
 
-    n_steps = state_below.shape[0]
-    n_samples = state_below.shape[1] if state_below.ndim == 3 else 1
-    state_below = (tensor.dot(state_below, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
-    rval, _ = theano.scan(_step, sequences=[mask, state_below], outputs_info=[tensor.alloc(to_t_float(0.), n_samples, n_dim_out), tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], name=_concat(prefix, '_layer'), n_steps=n_steps)
+    n_steps = state_in.shape[0]
+    n_samples = state_in.shape[1] if state_in.ndim == 3 else 1
+    state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
+    rval, _ = theano.scan(_step, sequences=[mask, state_in], outputs_info=[tensor.alloc(to_t_float(0.), n_samples, n_dim_out), tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], name=_concat(prefix, '_layer'), n_steps=n_steps)
 
     return rval[0]

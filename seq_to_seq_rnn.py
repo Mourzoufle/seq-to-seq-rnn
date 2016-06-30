@@ -3,6 +3,7 @@ A sequence-to-sequence recurrent neural network model for visual storytelling
 '''
 
 from __future__ import print_function
+import copy
 import time
 import json
 from collections import OrderedDict
@@ -12,7 +13,7 @@ import theano
 from theano import tensor, config
 from theano.sandbox.rng_mrg import MRG_RandomStreams
 
-from layers import dropout, dense, gru, softmax
+from layers import dropout, dense, gru
 from optimizers import rmsprop
 from utils import to_t_float, init_t_params, params_zip, params_unzip
 
@@ -56,8 +57,8 @@ def load_batch(samples, batch, mat):
     x = []
     y = []
     for idx in batch:
-        x.append(samples[idx][0])
-        y.append(samples[idx][1])
+        x.append(copy.deepcopy(samples[idx][0]))
+        y.append(copy.deepcopy(samples[idx][1]))
     max_len_x = max(len(row) for row in x)
     max_len_y = max(len(row) for row in y)
 
@@ -73,20 +74,25 @@ def load_batch(samples, batch, mat):
         mask_y[i].extend([0] * (max_len_y - len(mask_y[i])))
     x = mat[numpy.asarray(x).flatten()].reshape(n_samples, max_len_x, mat.shape[-1])
 
-    return numpy.swapaxes(numpy.asarray(x, dtype=config.floatX), 0, 1), numpy.asarray(mask_x, dtype='int8').T, numpy.asarray(y, dtype='int32').T, numpy.asarray(mask_y, dtype='int8').T
+    return numpy.swapaxes(numpy.array(x, dtype=config.floatX), 0, 1), numpy.array(mask_x, dtype='int8').T, numpy.array(y, dtype='int64').T, numpy.array(mask_y, dtype='int8').T
 
 
 def pred_error(f_prob, samples, batches, mat):
     '''
     Compute the prediction error
     '''
-    err = 0.
+    preds = []
+    errs = []
     for batch in batches:
         x, mask_x, y, mask_y = load_batch(samples, batch, mat)
-        preds = f_prob(x, mask_x, y, mask_y).argmax(axis=-1)
-        err += (((preds != y) * mask_y).sum(axis=0).astype(config.floatX) / mask_y.sum(axis=0)).sum()
+        pred = f_prob(x, mask_x, y, mask_y).argmax(axis=-1)
+        for i in range(1, pred.shape[0]):
+            pred[i] = pred[i] * (pred[i - 1] > 0)
+        preds.extend(pred.T.tolist())
+        mask_y = mask_y + pred > 0
+        errs.extend((((pred != y) * mask_y).sum(axis=0).astype(config.floatX) / mask_y.sum(axis=0)).tolist())
 
-    return preds, err / len(samples)
+    return preds, numpy.mean(errs)
 
 
 def main_model(
@@ -114,9 +120,9 @@ def main_model(
     # Save & Load
     path_load=None,                     # Path to load a previouly trained model
     path_save='model.npy',              # Path to save the best model
-    path_out_train='out_train.npy',     # Path to save predicted sentences of training set
-    path_out_val='out_val.npy',         # Path to save predicted sentences of validation set
-    path_out_test='out_test.npy',       # Path to save predicted sentences of testing set
+    path_out_train='out_train.json',    # Path to save predicted sentences of training set
+    path_out_val='out_val.json',        # Path to save predicted sentences of validation set
+    path_out_test='out_test.json',      # Path to save predicted sentences of testing set
     # MISC
     freq_disp=20,                       # Display the training progress after this number of updates
     freq_val=200,                       # Compute the validation error after this number of updates
@@ -143,45 +149,46 @@ def main_model(
     numpy.random.seed(SEED)
     trng = MRG_RandomStreams(SEED)
     # Flag of dropout
-    # use_dropout = theano.shared(to_t_float(0.))
+    use_dropout = theano.shared(to_t_float(0.))
     # Inputs
     x = tensor.tensor3('x', dtype=config.floatX)
     mask_x = tensor.matrix('mask_x', dtype='int8')
-    y = tensor.matrix('y', dtype='int32')
+    y = tensor.matrix('y', dtype='int64')
     mask_y = tensor.matrix('mask_y', dtype='int8')
 
+    n_steps, n_samples = y.shape
     t_params = OrderedDict()
     if path_load:
         init_t_params(numpy.load(path_load), t_params)
     # Encoder(s)
-    output = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'encoder_1', path_load is None)[-1]
+    out_enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc_1')
     # Repetition of the final state of hidden layer
-    output = tensor.repeat(output.dimshuffle('x', 0, 1), y.shape[0], axis=0)
+    out_enc = tensor.repeat(out_enc[-1].dimshuffle('x', 0, 1), n_steps, axis=0)
     # Decoder(s)
-    output = gru(mask_y, output, t_params, n_dim_enc, n_dim_dec, 'decoder_1', path_load is None)
-    # output = dropout(output, use_dropout, trng)
+    out_dec = gru(mask_y, out_enc, t_params, n_dim_enc, n_dim_dec, 'dec_1')
+    # Add dropout to the output of the final decoder
+    out_dec = dropout(out_dec, use_dropout, trng)
     # Classifier
-    output = dense(output, t_params, n_dim_dec, n_dim_txt, 'fc', path_load is None)
-    output = softmax(output)
+    out_fc = dense(out_dec, t_params, n_dim_dec, n_dim_txt, 'fc_1')
+    out_fc = tensor.nnet.softmax(out_fc.reshape((n_steps * n_samples, n_dim_txt)))
     # Cost function
-    offset = 1e-8 if output.dtype == 'float16' else 1e-6
-    cost = output.reshape((y.shape[0] * y.shape[1], n_dim_txt))[tensor.arange(y.shape[0] * y.shape[1]), y.flatten()].reshape((y.shape[0], y.shape[1]))
-    cost = ((-tensor.log(cost + offset) * mask_y).sum(axis=0) / mask_y.sum(axis=0)).mean()
+    offset = 1e-8 if out_fc.dtype == 'float16' else 1e-6
+    cost = out_fc[tensor.arange(n_steps * n_samples), y.flatten()].reshape((n_steps, n_samples))
+    cost = (-tensor.log(cost + offset) * mask_y).sum() / mask_y.sum()
     grads = tensor.grad(cost, wrt=list(t_params.values()))
-    f_prob = theano.function([x, mask_x, y, mask_y], output, name='f_prob')
+    f_prob = theano.function([x, mask_x, y, mask_y], out_fc.reshape((n_steps, n_samples, n_dim_txt)), name='f_prob')
     f_grad_shared, f_update = optimizer(tensor.scalar(name='lr'), t_params, grads, x, mask_x, y, mask_y, cost)
 
     print('Training...')
-    batches_train = get_batches(len(samples_train), batch_size_train, shuffle=True)
     batches_val = get_batches(len(samples_val), batch_size_pred)
     batches_test = get_batches(len(samples_test), batch_size_pred)
     history_errs = []
     best_p = None
     bad_count = 0
     if freq_val <= 0:
-        freq_val = len(batches_train)
+        freq_val = (len(samples_train) - 1) / batch_size_train + 1
     if freq_save <= 0:
-        freq_save = len(batches_train) * max_epochs + 1 # No automatic saving
+        freq_save = ((len(samples_train) - 1) / batch_size_train + 1) * max_epochs + 1 # No automatic saving
     n_epoch = 0
     n_batches = 0
     stop = False
@@ -189,9 +196,10 @@ def main_model(
 
     while n_epoch < max_epochs:
         n_epoch += 1
+        batches_train = get_batches(len(samples_train), batch_size_train, shuffle=True)
         for batch in batches_train:
             n_batches += 1
-            # use_dropout.set_value(1.)
+            use_dropout.set_value(1.)
             x, mask_x, y, mask_y = load_batch(samples_train, batch, mat_train)
             cost = f_grad_shared(x, mask_x, y, mask_y)
             f_update(lrate)
@@ -213,8 +221,8 @@ def main_model(
 
             if numpy.mod(n_batches, freq_val) == 0:
                 print('Validating...')
-                # use_dropout.set_value(0.)
-                _, err_train = pred_error(f_prob, samples_train, batches_train[: n_batches % len(batches_train) if n_batches > len(batches_train) else n_batches], mat_train)
+                use_dropout.set_value(0.)
+                _, err_train = pred_error(f_prob, samples_train, batches_train, mat_train)
                 _, err_val = pred_error(f_prob, samples_val, batches_val, mat_val)
                 _, err_test = pred_error(f_prob, samples_test, batches_test, mat_test)
                 history_errs.append([err_val, err_test])
@@ -241,16 +249,20 @@ def main_model(
         best_p = params_unzip(t_params)
 
     print('Final predicting...')
-    # use_dropout.set_value(0.)
+    use_dropout.set_value(0.)
     preds_train, err_train = pred_error(f_prob, samples_train, get_batches(len(samples_train), batch_size_pred), mat_train)
     preds_val, err_val = pred_error(f_prob, samples_val, batches_val, mat_val)
     preds_test, err_test = pred_error(f_prob, samples_test, batches_test, mat_test)
     print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
     if path_save:
         numpy.save(path_save, best_p)
-    numpy.save(path_out_train, preds_train)
-    numpy.save(path_out_val, preds_val)
-    numpy.save(path_out_test, preds_test)
+
+    with open(path_out_train, 'w') as file_out:
+        json.dump(preds_train, file_out)
+    with open(path_out_val, 'w') as file_out:
+        json.dump(preds_val, file_out)
+    with open(path_out_test, 'w') as file_out:
+        json.dump(preds_test, file_out)
     print('All works finished')
 
 
