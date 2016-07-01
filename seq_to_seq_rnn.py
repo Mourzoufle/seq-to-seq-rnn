@@ -222,7 +222,7 @@ def main_model(
             if numpy.mod(n_batches, freq_val) == 0:
                 print('Validating...')
                 use_dropout.set_value(0.)
-                _, err_train = pred_error(f_prob, samples_train, batches_train, mat_train)
+                _, err_train = pred_error(f_prob, samples_train, [batch], mat_train)
                 _, err_val = pred_error(f_prob, samples_val, batches_val, mat_val)
                 _, err_test = pred_error(f_prob, samples_test, batches_test, mat_test)
                 history_errs.append([err_val, err_test])
