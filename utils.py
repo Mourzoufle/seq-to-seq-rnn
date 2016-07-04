@@ -11,14 +11,14 @@ from theano import config
 
 def to_t_float(data):
     '''
-    Convert given data to float format used by theano
+    Convert given data to float format used by Theano
     '''
     return numpy.asarray(data, dtype=config.floatX)
 
 
 def init_t_params(params, t_params):
     '''
-    Initialize theano parameters from given values
+    Initialize Theano parameters from given values
     '''
     for key, value in params.items():
         t_params[key] = theano.shared(value, name=key)
