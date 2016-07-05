@@ -39,7 +39,7 @@ def ortho_weight(n_dim_in, n_dim_out, scale=0.01):
     '''
     Initialize the weights - Use a group of orthogonal vectors after SVD factorization
     '''
-    u, _, v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), full_matrices=True)
+    u, _, v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), full_matrices=False)
     if n_dim_in >= n_dim_out:
         return u
     else:
@@ -50,6 +50,8 @@ def dropout(state_in, use_dropout, trng, ratio=0.5):
     '''
     Dropout layer
     '''
+    ratio = 1 - ratio
+
     return tensor.switch(use_dropout, (state_in * trng.binomial(state_in.shape, p=ratio, n=1, dtype=state_in.dtype)), state_in * ratio)
 
 
@@ -57,13 +59,25 @@ def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Full-connected layer
     '''
-    if not t_params.has_key(_concat(prefix, 'b')):
+    if not t_params.has_key(_concat(prefix, 'W')):
         params = OrderedDict()
         params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
         params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,)).astype(config.floatX)
         init_t_params(params, t_params)
 
     return tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')]
+
+
+def embedding(state_in, t_params, n_dim_in, n_dim_out, prefix):
+    '''
+    Word embedding layer - Return a matrix that nay need to be reshaped
+    '''
+    if not t_params.has_key(_concat(prefix, 'W')):
+        params = OrderedDict()
+        params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
+        init_t_params(params, t_params)
+
+    return t_params[_concat(prefix, 'W')][state_in.flatten()]
 
 
 def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, state_out=None):

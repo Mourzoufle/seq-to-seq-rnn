@@ -15,12 +15,12 @@ def sgd(lr, t_params, grads, inputs, cost):
 
     Parameters
     ----------
-    lr: Theano shared variable
+    lr: Theano SharedVariable variable
         Initial learning rate
-    t_params: Theano SharedVariable
+    t_params: Theano SharedVariable variable
         Model parameters
     grads: Theano variable
-        Gradients of cost w.r.t to parameres
+        Gradients of cost w.r.t. to parameres
     inputs: list of Theano variables
         Inputs
     cost: Theano variable
@@ -48,9 +48,9 @@ def adam(lr, t_params, grads, inputs, cost):
 
     Parameters
     ----------
-    lr: Theano shared variable
+    lr: Theano SharedVariable variable
         Initial learning rate
-    t_params: Theano SharedVariable
+    t_params: Theano SharedVariable variable
         Model parameters
     grads: Theano variable
         Gradients of cost w.r.t. to parameres
@@ -84,9 +84,9 @@ def adadelta(lr, t_params, grads, inputs, cost):
 
     Parameters
     ----------
-    lr: Theano shared variable
+    lr: Theano SharedVariable variable
         Initial learning rate
-    t_params: Theano SharedVariable
+    t_params: Theano SharedVariable variable
         Model parameters
     grads: Theano variable
         Gradients of cost w.r.t. to parameres
@@ -119,12 +119,12 @@ def rmsprop(lr, t_params, grads, inputs, cost):
 
     Parameters
     ----------
-    lr: Theano shared variable
+    lr: Theano SharedVariable variable
         Initial learning rate
-    t_params: Theano SharedVariable
+    t_params: Theano SharedVariable variable
         Model parameters
     grads: Theano variable
-        Gradients of cost w.r.t to parameres
+        Gradients of cost w.r.t. to parameres
     inputs: list of Theano variables
         Inputs
     cost: Theano variable

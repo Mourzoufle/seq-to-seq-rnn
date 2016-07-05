@@ -1,4 +1,4 @@
-'''
+﻿'''
 Pre-processing module for Microsoft SIND dataset
 '''
 
@@ -24,6 +24,7 @@ def pre_process(path_txt, path_img, path_out, vocab):
         for j in range(1, 5):
             items_txt[i].extend(items_txt[i + j])
             items_txt[i + j] = []
+        items_txt[i].append(0)
     items_txt = items_txt[: : 5]
 
     items_img = []
