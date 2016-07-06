@@ -14,7 +14,7 @@ def pre_process(path_txt, path_img, path_out, vocab):
         sents = json.load(file_in)['annotations']
         for sent in sents:
             item = []
-            tokens = re.split(' *', re.sub('[^a-z\[\]]', ' ', sent[0]['text']))
+            tokens = re.split(' *', re.sub(r'[^a-z\[\]]', ' ', sent[0]['text']))
             for token in tokens:
                 if vocab.has_key(token):
                     item.append(vocab[token])

@@ -8,6 +8,7 @@ import numpy
 import theano
 from theano import tensor
 from theano import config
+from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from utils import to_t_float, init_t_params
 
@@ -28,31 +29,32 @@ def _slice(tensor_in, idx, n_dim):
     return tensor_in[:, idx * n_dim: (idx + 1) * n_dim]
 
 
-def norm_weight(n_dim_in, n_dim_out, scale=0.01):
+def norm_weight(n_dim_in, n_dim_out, scale = 0.01):
     '''
     Initialize the weights - Use random samples in normal distribution
     '''
     return scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX)
 
 
-def ortho_weight(n_dim_in, n_dim_out, scale=0.01):
+def ortho_weight(n_dim_in, n_dim_out, scale = 0.01):
     '''
     Initialize the weights - Use a group of orthogonal vectors after SVD factorization
     '''
-    u, _, v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), full_matrices=False)
+    u, _, v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), False)
     if n_dim_in >= n_dim_out:
         return u
     else:
         return v
 
 
-def dropout(state_in, use_dropout, trng, ratio=0.5):
+def dropout(state_in, use_dropout, trng = None, ratio = 0.5):
     '''
     Dropout layer
     '''
-    ratio = 1 - ratio
+    if trng is None:
+        trng = MRG_RandomStreams()
 
-    return tensor.switch(use_dropout, (state_in * trng.binomial(state_in.shape, p=ratio, n=1, dtype=state_in.dtype)), state_in * ratio)
+    return tensor.switch(use_dropout, state_in * trng.binomial(state_in.shape, p = 1 - ratio, dtype = state_in.dtype), state_in * (1 - ratio))
 
 
 def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
@@ -62,7 +64,7 @@ def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
     if not t_params.has_key(_concat(prefix, 'W')):
         params = OrderedDict()
         params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
-        params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,)).astype(config.floatX)
+        params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,), config.floatX)
         init_t_params(params, t_params)
 
     return tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')]
@@ -80,7 +82,7 @@ def embedding(state_in, t_params, n_dim_in, n_dim_out, prefix):
     return t_params[_concat(prefix, 'W')][state_in.flatten()]
 
 
-def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, state_out=None):
+def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False, init_h = None):
     '''
     Gated Recurrent Unit (GRU) layer
     '''
@@ -98,24 +100,27 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, s
 
     if not t_params.has_key(_concat(prefix, 'b')):
         params = OrderedDict()
-        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], axis=1)
-        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], axis=1)
-        params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,)).astype(config.floatX)
+        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
+        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
+        params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,), config.floatX)
         init_t_params(params, t_params)
 
-    n_steps = state_in.shape[0]
-    n_samples = state_in.shape[1] if state_in.ndim == 3 else 1
-    state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
-    if state_out is None:
-        state_out = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
     if one_step:
-        return _step(mask, state_in, state_out)
+        n_steps = 1
+        n_samples = state_in.shape[0]
     else:
-        rval, _ = theano.scan(_step, sequences=[mask, state_in], outputs_info=[state_out], name=_concat(prefix, '_layer'), n_steps=n_steps)
+        n_steps, n_samples, _ = state_in.shape
+    state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
+    if init_h is None:
+        init_h = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
+    if one_step:
+        return _step(mask, state_in, init_h)
+    else:
+        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps = n_steps, name = _concat(prefix, '_layer'))
         return rval
 
 
-def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, state_out=None):
+def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False, state_out = None):
     '''
     Long Short-Term Memory (LSTM) layer
     '''
@@ -135,19 +140,22 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
 
     if not t_params.has_key(_concat(prefix, 'b')):
         params = OrderedDict()
-        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], axis=1)
-        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], axis=1)
-        params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,)).astype(config.floatX)
+        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
+        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
+        params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,), config.floatX)
         init_t_params(params, t_params)
 
-    n_steps = state_in.shape[0]
-    n_samples = state_in.shape[1] if state_in.ndim == 3 else 1
+    if one_step:
+        n_steps = 1
+        n_samples = state_in.shape[0]
+    else:
+        n_steps, n_samples, _ = state_in.shape
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
     if state_out is None:
         state_out = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
     if one_step:
         rval, _ = _step(mask, state_in, state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out))
+        return rval
     else:
-        rval, _ = theano.scan(_step, sequences=[mask, state_in], outputs_info=[state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], name=_concat(prefix, '_layer'), n_steps=n_steps)
-
-    return rval[0]
+        rval, _ = theano.scan(_step, [mask, state_in], [state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps = n_steps, name = _concat(prefix, '_layer'))
+        return rval[0]
