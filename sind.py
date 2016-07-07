@@ -5,6 +5,7 @@ Pre-processing module for Microsoft SIND dataset
 import json
 import re
 
+
 def pre_process(path_txt, path_img, path_out, vocab):
     '''
     Pre-processing function to produce images-sentences pair in a subset of SIND
@@ -16,7 +17,7 @@ def pre_process(path_txt, path_img, path_out, vocab):
             item = []
             tokens = re.split(' *', re.sub(r'[^a-z\[\]]', ' ', sent[0]['text']))
             for token in tokens:
-                if vocab.has_key(token):
+                if token in vocab:
                     item.append(vocab[token])
             items_txt.append(item)
 
@@ -37,7 +38,8 @@ def pre_process(path_txt, path_img, path_out, vocab):
 
 if __name__ == '__main__':
     vocab = {}
-    with open('dict_10.txt', 'r') as file_in:   # currently use words whose frequencies are not lower than 10
+    # currently use words whose frequencies are not lower than 10
+    with open('dict_10.txt', 'r') as file_in:
         words = file_in.readlines()
         for word in words:
             idx = len(vocab) + 1

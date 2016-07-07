@@ -29,14 +29,14 @@ def _slice(tensor_in, idx, n_dim):
     return tensor_in[:, idx * n_dim: (idx + 1) * n_dim]
 
 
-def norm_weight(n_dim_in, n_dim_out, scale = 0.01):
+def norm_weight(n_dim_in, n_dim_out, scale=0.01):
     '''
     Initialize the weights - Use random samples in normal distribution
     '''
     return scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX)
 
 
-def ortho_weight(n_dim_in, n_dim_out, scale = 0.01):
+def ortho_weight(n_dim_in, n_dim_out, scale=0.01):
     '''
     Initialize the weights - Use a group of orthogonal vectors after SVD factorization
     '''
@@ -47,21 +47,21 @@ def ortho_weight(n_dim_in, n_dim_out, scale = 0.01):
         return v
 
 
-def dropout(state_in, use_dropout, trng = None, ratio = 0.5):
+def dropout(state_in, use_dropout, trng=None, ratio=0.5):
     '''
     Dropout layer
     '''
     if trng is None:
         trng = MRG_RandomStreams()
 
-    return tensor.switch(use_dropout, state_in * trng.binomial(state_in.shape, p = 1 - ratio, dtype = state_in.dtype), state_in * (1 - ratio))
+    return tensor.switch(use_dropout, state_in * trng.binomial(state_in.shape, p=1 - ratio, dtype=state_in.dtype), state_in * (1 - ratio))
 
 
 def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Full-connected layer
     '''
-    if not t_params.has_key(_concat(prefix, 'W')):
+    if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
         params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
         params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,), config.floatX)
@@ -74,7 +74,7 @@ def embedding(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Word embedding layer - Return a matrix that nay need to be reshaped
     '''
-    if not t_params.has_key(_concat(prefix, 'W')):
+    if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
         params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
         init_t_params(params, t_params)
@@ -82,7 +82,7 @@ def embedding(state_in, t_params, n_dim_in, n_dim_out, prefix):
     return t_params[_concat(prefix, 'W')][state_in.flatten()]
 
 
-def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False, init_h = None):
+def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, init_h=None):
     '''
     Gated Recurrent Unit (GRU) layer
     '''
@@ -98,7 +98,7 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False,
 
         return _h_new
 
-    if not t_params.has_key(_concat(prefix, 'b')):
+    if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
         params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
         params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
@@ -116,11 +116,11 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False,
     if one_step:
         return _step(mask, state_in, init_h)
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps = n_steps, name = _concat(prefix, '_layer'))
+        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps=n_steps, name=_concat(prefix, '_scan'))
         return rval
 
 
-def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False, state_out = None):
+def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, state_out=None):
     '''
     Long Short-Term Memory (LSTM) layer
     '''
@@ -138,7 +138,7 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False
 
         return _h_new, _c_new
 
-    if not t_params.has_key(_concat(prefix, 'b')):
+    if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
         params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
         params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
@@ -157,5 +157,5 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step = False
         rval, _ = _step(mask, state_in, state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out))
         return rval
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], [state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps = n_steps, name = _concat(prefix, '_layer'))
+        rval, _ = theano.scan(_step, [mask, state_in], [state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps=n_steps, name=_concat(prefix, '_scan'))
         return rval[0]

@@ -27,7 +27,7 @@ def get_batches(n_samples, batch_size, shuffle=False):
     '''
     Get batches of data
     '''
-    indices = numpy.arange(n_samples, dtype = "int32")
+    indices = numpy.arange(n_samples, dtype='int32')
     if shuffle:
         numpy.random.shuffle(indices)
     batches = []
@@ -76,7 +76,7 @@ def load_batch(samples, batch, mat):
         mask_y[i].extend([0] * (max_len_y - len(mask_y[i])))
     x = mat[numpy.asarray(x).flatten()].reshape(n_samples, max_len_x, mat.shape[-1])
 
-    return numpy.swapaxes(numpy.asarray(x, dtype = config.floatX), 0, 1), numpy.asarray(mask_x, dtype = 'int8').T, numpy.asarray(y, dtype = 'int64').T, numpy.asarray(mask_y, dtype = 'int8').T
+    return numpy.swapaxes(numpy.asarray(x, config.floatX), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int64').T, numpy.asarray(mask_y, 'int8').T
 
 
 def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer):
@@ -91,7 +91,7 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     # Initialization of hidden layer
     init_h = dense(enc, t_params, n_dim_enc, n_dim_dec, 'init_h')
     init_h = tensor.tanh(init_h)
-    f_enc = theano.function([x, mask_x], [enc, init_h], name = 'f_enc')
+    f_enc = theano.function([x, mask_x], [enc, init_h], name='f_enc')
 
     y = tensor.matrix('y', 'int64')
     mask_y = tensor.matrix('mask_y', 'int8')
@@ -102,7 +102,7 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     emb = embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb').reshape((n_steps, n_samples, n_dim_txt))[1:]
     emb = tensor.concatenate([tensor.zeros((1, n_samples, n_dim_txt)), emb])
     # Decoder(s)
-    dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h = init_h)
+    dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h)
     # Add dropout to the output of the final decoder
     dec = dropout(dec, True, trng)
     # Classifier
@@ -133,7 +133,7 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
     # Classifier
     dec = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec)
-    f_dec = theano.function([y, enc, init_h], [dec, next_h], name = 'f_dec')
+    f_dec = theano.function([y, enc, init_h], [dec, next_h], name='f_dec')
 
     return f_dec
 
@@ -143,66 +143,105 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
     Sample words using beam search and compute the prediction error
     '''
     preds = []
-    err = 0.
+    errs = []
     for batch in batches:
         x, mask_x, y, mask_y = load_batch(samples, batch, mat)
         enc, init_h = f_enc(x, mask_x)
 
-        n_samples = y.shape[1]
-        hypo_sents = [[[]] * size_beam] * n_samples
-        hypo_scores = [[0.] * size_beam] * n_samples
-        init_hs = [[]] * n_samples
+        n_samples = x.shape[1]
+        hypo_sents = numpy.zeros((size_beam, n_samples, max_len), 'int64')
+        hypo_scores = numpy.zeros((size_beam, n_samples), config.floatX)
+        hypo_states = numpy.zeros((size_beam, n_samples, init_h.shape[-1]), config.floatX)
 
         # First step - No embedded word is fed into the decoder
         hypo_words = numpy.asarray([-1] * n_samples, 'int64')
         dec, init_h = f_dec(hypo_words, enc, init_h)
         for i in range(size_beam):
             words = dec.argmax(-1)
-            scores = numpy.log(dec[numpy.arange(n_samples), words] + 1e-6)
+            hypo_sents[i, :, 0] = words
+            hypo_scores[i] = numpy.log(dec[numpy.arange(n_samples), words] + 1e-6)
             dec[numpy.arange(n_samples), words] = 0
+            hypo_states[i] = init_h
+
+        for i in range(1, max_len - 1):
+            sents = [[]] * n_samples
+            scores = [[]] * n_samples
+            states = [[]] * n_samples
+            gen_hypos = [False] * n_samples
+            for j in range(size_beam):
+                hypo_words = hypo_sents[j, :, i - 1]
+                dec, init_h = f_dec(hypo_words, enc, hypo_states[j])
+                for k in range(n_samples):
+                    if hypo_words[k] > 0:
+                        gen_hypos[k] = True
+                        for l in range(size_beam):
+                            word = dec[k].argmax()
+                            sent = hypo_sents[j, k].copy()
+                            sent[i] = word
+                            sents[k].append(sent)
+                            scores[k].append(hypo_scores[j, k] + numpy.log(dec[k, word] + 1e-6))
+                            states[k].append(init_h[k])
+                            dec[k, word] = 0
+                    else:
+                        sents[k].append(hypo_sents[j, k].copy())
+                        scores[k].append(hypo_scores[j, k])
+                        states[k].append(hypo_states[j, k].copy())
+
             for j in range(n_samples):
-                hypo_sents[j][i].append(words[j])
-                hypo_scores[j][i] += scores[j]
-                init_hs[j].append(init_h[j].reshape((1, init_h.shape[-1])))
-
+                if not gen_hypos[j]:
+                    continue
+                indices = numpy.argsort(hypo_scores[:, j])[: : -1]
+                for k in range(size_beam):
+                    hypo_sents[k, j] = sents[j][indices[k]]
+                    hypo_scores[k, j] = scores[j][indices[k]]
+                    hypo_states[k, j] = states[j][indices[k]]
+            if not gen_hypos.any():
+                break
         # TODO
+        hypo_sents = hypo_sents[hypo_scores.argmax(0), numpy.arange(n_samples)]
+        for i in range(n_samples):
+            cur_len = (hypo_sents[i] > 0).sum()
+            preds.append(hypo_sents[i, : cur_len].tolist())
+        y = numpy.concatenate([y, numpy.zeros((max_len - len(y)), n_samples)]).T
+        mask_y = numpy.concatenate([y, numpy.zeros((max_len - len(mask_y)), n_samples)]).T
+        errs.extend(((hypo_sents != y) * mask_y * 1.).sum(1) / mask_y.sum(1))
 
-    return preds, err
+    return preds, numpy.mean(errs)
 
 
 def main_model(
     # Dataset Configuration
-    path_train = 'train.json',                                  # Path to load training set
-    path_val = 'val.json',                                      # Path to load validation set
-    path_test = 'test.json',                                    # Path to load testing set
-    path_mat_train = 'VGG19_train.npy',                         # Path of image features of training set
-    path_mat_val = 'VGG19_val.npy',                             # Path of image features of validation set
-    path_mat_test = 'VGG19_test.npy',                           # Path of image features of testing set
-    max_samples_train = 0,                                      # Max number of samples in training
-    max_samples_val = 0,                                        # Max number of samples in validating
-    max_samples_test = 0,                                       # Max number of samples in testing
+    path_train='train.json',            # Path to load training set
+    path_val='val.json',                # Path to load validation set
+    path_test='test.json',              # Path to load testing set
+    path_mat_train='VGG19_train.npy',   # Path of image features of training set
+    path_mat_val='VGG19_val.npy',       # Path of image features of validation set
+    path_mat_test='VGG19_test.npy',     # Path of image features of testing set
+    max_samples_train=0,                # Max number of samples in training
+    max_samples_val=0,                  # Max number of samples in validating
+    max_samples_test=0,                 # Max number of samples in testing
     # Model Configuration
-    n_dim_img = 4096,                                           # Dimension of image feature
-    n_dim_txt = 300,                                            # Dimension of word embedding
-    n_dim_enc = 256,                                            # Number of hidden units in encoder
-    n_dim_dec = 512,                                            # Number of hidden units in decoder
-    batch_size_train = 64,                                      # Batch size in training
-    batch_size_pred = 256,                                      # Batch size in validation / testing
-    optimizer = rmsprop,                                        # [sgd|adam|adadelta|rmsprop], sgd not recommanded
-    lrate = 0.0002,                                             # Learning rate for optimizer
-    max_epochs = 1000,                                          # Maximum number of epoch to run
-    patience = 10,                                              # Number of epoch to wait before early stop if no progress
-    size_beam = 2,                                              # number of candidate(s) in beam search
+    n_dim_img=4096,                     # Dimension of image feature
+    n_dim_txt=300,                      # Dimension of word embedding
+    n_dim_enc=256,                      # Number of hidden units in encoder
+    n_dim_dec=512,                      # Number of hidden units in decoder
+    batch_size_train=64,                # Batch size in training
+    batch_size_pred=256,                # Batch size in validation / testing
+    optimizer=rmsprop,                  # [sgd|adam|adadelta|rmsprop], sgd not recommanded
+    lrate=0.0002,                       # Learning rate for optimizer
+    max_epochs=1000,                    # Maximum number of epoch to run
+    patience=10,                        # Number of epoch to wait before early stop if no progress
+    size_beam=2,                        # number of candidate(s) in beam search
     # Save & Load
-    path_load = None,                                           # Path to load a previouly trained model
-    path_save = 'model.npy',                                    # Path to save the best model
-    path_out_train = 'out_train.json',                          # Path to save predicted sentences of training set
-    path_out_val = 'out_val.json',                              # Path to save predicted sentences of validation set
-    path_out_test = 'out_test.json',                            # Path to save predicted sentences of testing set
+    path_load=None,                     # Path to load a previouly trained model
+    path_save='model.npy',              # Path to save the best model
+    path_out_train='out_train.json',    # Path to save predicted sentences of training set
+    path_out_val='out_val.json',        # Path to save predicted sentences of validation set
+    path_out_test='out_test.json',      # Path to save predicted sentences of testing set
     # MISC
-    freq_disp = 20,                                             # Display the training progress after this number of updates
-    freq_val = 200,                                             # Compute the validation error after this number of updates
-    freq_save = 1000,                                           # Save the parameters after this number of updates
+    freq_disp=20,                       # Display the training progress after this number of updates
+    freq_val=200,                       # Compute the validation error after this number of updates
+    freq_save=1000,                     # Save the parameters after this number of updates
 ):
     '''
     The main process to do visual storytelling via a seq-to-seq RNN model
