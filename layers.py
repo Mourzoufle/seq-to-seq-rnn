@@ -120,7 +120,7 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, i
         return rval
 
 
-def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, state_out=None):
+def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, init_h=None):
     '''
     Long Short-Term Memory (LSTM) layer
     '''
@@ -151,11 +151,11 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
     else:
         n_steps, n_samples, _ = state_in.shape
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
-    if state_out is None:
-        state_out = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
+    if init_h is None:
+        init_h = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
     if one_step:
-        rval, _ = _step(mask, state_in, state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out))
+        rval, _ = _step(mask, state_in, init_h, tensor.alloc(to_t_float(0.), n_samples, n_dim_out))
         return rval
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], [state_out, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps=n_steps, name=_concat(prefix, '_scan'))
+        rval, _ = theano.scan(_step, [mask, state_in], [init_h, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps=n_steps, name=_concat(prefix, '_scan'))
         return rval[0]

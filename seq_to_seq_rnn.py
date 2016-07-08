@@ -15,7 +15,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from layers import dropout, dense, embedding, gru
 from optimizers import rmsprop
-from utils import init_t_params, params_zip, params_unzip
+from utils import to_t_float, init_t_params, params_zip, params_unzip
 
 
 SEED = 65535
@@ -76,14 +76,13 @@ def load_batch(samples, batch, mat):
         mask_y[i].extend([0] * (max_len_y - len(mask_y[i])))
     x = mat[numpy.asarray(x).flatten()].reshape(n_samples, max_len_x, mat.shape[-1])
 
-    return numpy.swapaxes(numpy.asarray(x, config.floatX), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int64').T, numpy.asarray(mask_y, 'int8').T
+    return numpy.swapaxes(to_t_float(x), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int32').T, numpy.asarray(mask_y, 'int8').T
 
 
 def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer):
     '''
     Build the whole model for training
     '''
-    # Inputs
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
     # Encoder(s)
@@ -93,7 +92,7 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     init_h = tensor.tanh(init_h)
     f_enc = theano.function([x, mask_x], [enc, init_h], name='f_enc')
 
-    y = tensor.matrix('y', 'int64')
+    y = tensor.matrix('y', 'int32')
     mask_y = tensor.matrix('mask_y', 'int8')
     n_steps, n_samples = y.shape
     # Repetition of the final state of hidden layer
@@ -104,13 +103,13 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     # Decoder(s)
     dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h)
     # Add dropout to the output of the final decoder
-    dec = dropout(dec, True, trng)
+    dec = dropout(dec, to_t_float(1.), trng)
     # Classifier
     dec = dense(dec, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec.reshape((n_steps * n_samples, n_dim_vocab)))
     # Cost function
     cost = dec[tensor.arange(n_steps * n_samples), y.flatten()].reshape((n_steps, n_samples))
-    cost = (-tensor.log(cost + 1e-6) * mask_y).sum() / mask_y.sum()
+    cost = ((-tensor.log(cost + 1e-6) * mask_y).sum(0) / mask_y.astype(config.floatX).sum(0)).mean()
     grads = tensor.grad(cost, list(t_params.values()))
     f_cost, f_update = optimizer(tensor.scalar('lr'), t_params, grads, [x, mask_x, y, mask_y], cost)
 
@@ -121,15 +120,14 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
     '''
     Build word sampler for validation / testing
     '''
-    # Inputs
-    y = tensor.vector('y', 'int64')
+    y = tensor.vector('y', 'int32')
     enc = tensor.matrix('enc', config.floatX)
     init_h = tensor.matrix('init_h', config.floatX)
     n_samples = y.shape[0]
     # Word embedding
     emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
-    next_h = gru(tensor.ones_like(y), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h)
+    next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h)
     # Classifier
     dec = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec)
@@ -149,12 +147,12 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
         enc, init_h = f_enc(x, mask_x)
 
         n_samples = x.shape[1]
-        hypo_sents = numpy.zeros((size_beam, n_samples, max_len), 'int64')
+        hypo_sents = numpy.zeros((size_beam, n_samples, max_len), 'int32')
         hypo_scores = numpy.zeros((size_beam, n_samples), config.floatX)
         hypo_states = numpy.zeros((size_beam, n_samples, init_h.shape[-1]), config.floatX)
 
         # First step - No embedded word is fed into the decoder
-        hypo_words = numpy.asarray([-1] * n_samples, 'int64')
+        hypo_words = numpy.asarray([-1] * n_samples, 'int32')
         dec, init_h = f_dec(hypo_words, enc, init_h)
         for i in range(size_beam):
             words = dec.argmax(-1)
@@ -167,14 +165,14 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
             sents = [[]] * n_samples
             scores = [[]] * n_samples
             states = [[]] * n_samples
-            gen_hypos = [False] * n_samples
+            gen_hypos = numpy.asarray([False] * n_samples)
             for j in range(size_beam):
                 hypo_words = hypo_sents[j, :, i - 1]
                 dec, init_h = f_dec(hypo_words, enc, hypo_states[j])
                 for k in range(n_samples):
                     if hypo_words[k] > 0:
                         gen_hypos[k] = True
-                        for l in range(size_beam):
+                        for _ in range(size_beam):
                             word = dec[k].argmax()
                             sent = hypo_sents[j, k].copy()
                             sent[i] = word
@@ -197,13 +195,13 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
                     hypo_states[k, j] = states[j][indices[k]]
             if not gen_hypos.any():
                 break
-        # TODO
+
         hypo_sents = hypo_sents[hypo_scores.argmax(0), numpy.arange(n_samples)]
         for i in range(n_samples):
             cur_len = (hypo_sents[i] > 0).sum()
             preds.append(hypo_sents[i, : cur_len].tolist())
-        y = numpy.concatenate([y, numpy.zeros((max_len - len(y)), n_samples)]).T
-        mask_y = numpy.concatenate([y, numpy.zeros((max_len - len(mask_y)), n_samples)]).T
+        y = numpy.concatenate([y, numpy.zeros((max_len - len(y), n_samples), 'int32')]).T
+        mask_y = numpy.concatenate([mask_y, numpy.zeros((max_len - len(mask_y), n_samples), 'int32')]).T
         errs.extend(((hypo_sents != y) * mask_y * 1.).sum(1) / mask_y.sum(1))
 
     return preds, numpy.mean(errs)
@@ -211,55 +209,56 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
 
 def main_model(
     # Dataset Configuration
-    path_train='train.json',            # Path to load training set
-    path_val='val.json',                # Path to load validation set
-    path_test='test.json',              # Path to load testing set
-    path_mat_train='VGG19_train.npy',   # Path of image features of training set
-    path_mat_val='VGG19_val.npy',       # Path of image features of validation set
-    path_mat_test='VGG19_test.npy',     # Path of image features of testing set
-    max_samples_train=0,                # Max number of samples in training
-    max_samples_val=0,                  # Max number of samples in validating
-    max_samples_test=0,                 # Max number of samples in testing
+    path_train='../train.json',             # Path to load training set
+    path_val='../val.json',                 # Path to load validation set
+    path_test='../test.json',               # Path to load testing set
+    path_mat_train='../VGG19_train.npy',    # Path of image features of training set
+    path_mat_val='../VGG19_val.npy',        # Path of image features of validation set
+    path_mat_test='../VGG19_test.npy',      # Path of image features of testing set
+    max_samples_train=0,                    # Max number of samples in training
+    max_samples_val=0,                      # Max number of samples in validating
+    max_samples_test=0,                     # Max number of samples in testing
     # Model Configuration
-    n_dim_img=4096,                     # Dimension of image feature
-    n_dim_txt=300,                      # Dimension of word embedding
-    n_dim_enc=256,                      # Number of hidden units in encoder
-    n_dim_dec=512,                      # Number of hidden units in decoder
-    batch_size_train=64,                # Batch size in training
-    batch_size_pred=256,                # Batch size in validation / testing
-    optimizer=rmsprop,                  # [sgd|adam|adadelta|rmsprop], sgd not recommanded
-    lrate=0.0002,                       # Learning rate for optimizer
-    max_epochs=1000,                    # Maximum number of epoch to run
-    patience=10,                        # Number of epoch to wait before early stop if no progress
-    size_beam=2,                        # number of candidate(s) in beam search
+    n_dim_img=4096,                         # Dimension of image feature
+    n_dim_txt=300,                          # Dimension of word embedding
+    n_dim_enc=256,                          # Number of hidden units in encoder
+    n_dim_dec=512,                          # Number of hidden units in decoder
+    batch_size_train=64,                    # Batch size in training
+    batch_size_test=256,                    # Batch size in validation / testing
+    optimizer=rmsprop,                      # [sgd|adam|adadelta|rmsprop], sgd not recommanded
+    lrate=0.0002,                           # Learning rate for optimizer
+    max_epochs=1000,                        # Maximum number of epoch to run
+    patience=10,                            # Number of epoch to wait before early stop if no progress
+    size_beam=10,                           # number of candidate(s) in beam search
     # Save & Load
-    path_load=None,                     # Path to load a previouly trained model
-    path_save='model.npy',              # Path to save the best model
-    path_out_train='out_train.json',    # Path to save predicted sentences of training set
-    path_out_val='out_val.json',        # Path to save predicted sentences of validation set
-    path_out_test='out_test.json',      # Path to save predicted sentences of testing set
-    # MISC
-    freq_disp=20,                       # Display the training progress after this number of updates
-    freq_val=200,                       # Compute the validation error after this number of updates
-    freq_save=1000,                     # Save the parameters after this number of updates
+    path_load=None,                         # Path to load a previouly trained model
+    path_save='model.npy',                  # Path to save the best model
+    path_out_train='out_train.json',        # Path to save predicted sentences of training set
+    path_out_val='out_val.json',            # Path to save predicted sentences of validation set
+    path_out_test='out_test.json',          # Path to save predicted sentences of testing set
 ):
     '''
     The main process to do visual storytelling via a seq-to-seq RNN model
     '''
     print('Loading data...')
-    # Vocabulary size
-    n_dim_vocab = 0
+    n_dim_vocab = 0                                             # Vocabulary size
     samples_train, mat_train, n_dim_vocab = load_data(path_train, path_mat_train, n_dim_vocab)
-    # Max length of sentences
-    max_len = max([len(sample[1]) for sample in samples_train])
-    samples_val, mat_val, n_dim_vocab = load_data(path_val, path_mat_val, n_dim_vocab)
-    samples_test, mat_test, n_dim_vocab = load_data(path_test, path_mat_test, n_dim_vocab)
     if max_samples_train > 0:
         samples_train = samples_train[: max_samples_train]
+    max_len = max([len(sample[1]) for sample in samples_train]) # Max length of sentences
+
+    samples_val, mat_val, n_dim_vocab = load_data(path_val, path_mat_val, n_dim_vocab)
     if max_samples_val > 0:
         samples_val = samples_val[: max_samples_val]
+
+    samples_test, mat_test, n_dim_vocab = load_data(path_test, path_mat_test, n_dim_vocab)
     if max_samples_test > 0:
         samples_test = samples_test[: max_samples_test]
+
+    batches_val = get_batches(len(samples_val), batch_size_test)
+    batches_test = get_batches(len(samples_test), batch_size_test)
+    freq_disp = ((len(samples_train) - 1) / batch_size_train) / 20 + 1
+    freq_val = ((len(samples_train) - 1) / batch_size_train) / 4 + 1
     print('\ttraining:   %6d samples' % len(samples_train))
     print('\tvalidation: %6d samples' % len(samples_val))
     print('\ttesting:    %6d samples' % len(samples_test))
@@ -273,48 +272,34 @@ def main_model(
     f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab)
 
     print('Training...')
-    batches_val = get_batches(len(samples_val), batch_size_pred)
-    batches_test = get_batches(len(samples_test), batch_size_pred)
     history_errs = []
     best_p = None
     bad_count = 0
-    if freq_val <= 0:
-        freq_val = (len(samples_train) - 1) / batch_size_train + 1
-    if freq_save <= 0:
-        # No automatic saving
-        freq_save = ((len(samples_train) - 1) / batch_size_train + 1) * max_epochs + 1
-    n_epochs = 0
-    n_batches = 0
     stop = False
     time_start = time.time()
-
+    n_epochs = 0
+    n_batches = 0
     while n_epochs < max_epochs:
         n_epochs += 1
         batches_train = get_batches(len(samples_train), batch_size_train, True)
-        for batch in batches_train:
+        costs = []
+        for idx_batch, batch in enumerate(batches_train):
             n_batches += 1
+            idx_batch += 1
             x, mask_x, y, mask_y = load_batch(samples_train, batch, mat_train)
-            cost = f_cost(x, mask_x, y, mask_y)
+            costs.append(f_cost(x, mask_x, y, mask_y))
             f_update(lrate)
 
-            if numpy.isnan(cost) or numpy.isinf(cost):
+            if numpy.isnan(costs[-1]) or numpy.isinf(costs[-1]):
                 print('ERROR: bad cost detected!')
                 return
 
-            if numpy.mod(n_batches, freq_disp) == 0:
-                print('\tEPOCH: %6d    BATCH: %6d    COST: %12.6f' % (n_epochs, n_batches, cost))
+            if numpy.mod(idx_batch, freq_disp) == 0:
+                print('\tEPOCH: %6d    BATCH: %6d    COST: %12.6f' % (n_epochs, n_batches, numpy.mean(costs)))
 
-            if path_save and numpy.mod(n_batches, freq_save) == 0:
-                print('Saving model...')
-                if best_p is not None:
-                    params = best_p
-                else:
-                    params = params_unzip(t_params)
-                numpy.save(path_save, params)
-
-            if numpy.mod(n_batches, freq_val) == 0:
+            if numpy.mod(idx_batch, freq_val) == 0:
                 print('Validating...')
-                _, err_train = get_err(f_enc, f_dec, samples_train, [batch], mat_train, size_beam, max_len)
+                _, err_train = get_err(f_enc, f_dec, samples_train, batches_train[idx_batch - freq_val: idx_batch], mat_train, size_beam, max_len)
                 _, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, size_beam, max_len)
                 _, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, size_beam, max_len)
                 history_errs.append([err_val, err_test])
@@ -322,6 +307,7 @@ def main_model(
                 if (best_p is None or err_val <= numpy.array(history_errs)[:, 0].min()):
                     best_p = params_unzip(t_params)
                     bad_count = 0
+
                 print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
                 if len(history_errs) > patience and err_val >= numpy.array(history_errs)[: -patience, 0].min():
                     bad_count += 1
@@ -329,8 +315,18 @@ def main_model(
                         print('WARNING: early stop!')
                         stop = True
                         break
+
+        if path_save:
+            print('Saving model...')
+            if best_p is not None:
+                params = best_p
+            else:
+                params = params_unzip(t_params)
+            numpy.save(path_save, params)
+
         if stop:
             break
+
     time_end = time.time()
     print('Training finished')
     print('TIME: %9.3f sec    EPOCHS: %6d    SPEED: %9.3f sec/epoch' % (time_end - time_start, n_epochs, (time_end - time_start) / n_epochs))
@@ -341,23 +337,27 @@ def main_model(
         best_p = params_unzip(t_params)
 
     print('Final predicting...')
-    preds_train, err_train = get_err(f_enc, f_dec, samples_train, get_batches(len(samples_train), batch_size_pred), mat_train, size_beam, max_len)
+    preds_train, err_train = get_err(f_enc, f_dec, samples_train, get_batches(len(samples_train), batch_size_test), mat_train, size_beam, max_len)
     preds_val, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, size_beam, max_len)
     preds_test, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, size_beam, max_len)
     print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
+
     if path_save:
         numpy.save(path_save, best_p)
 
     with open(path_out_train, 'w') as file_out:
         json.dump(preds_train, file_out)
+
     with open(path_out_val, 'w') as file_out:
         json.dump(preds_val, file_out)
+
     with open(path_out_test, 'w') as file_out:
         json.dump(preds_test, file_out)
+
     print('All works finished')
 
 
 if __name__ == '__main__':
-    # For debugging, use the following args:
-    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_pred=50, max_epochs=100, freq_disp=1, freq_val=0, freq_save=0)
+    # For debugging, use the following arguments:
+    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=100, size_beam=2, path_save=None)
     main_model()
