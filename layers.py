@@ -10,7 +10,7 @@ from theano import tensor
 from theano import config
 from theano.sandbox.rng_mrg import MRG_RandomStreams
 
-from utils import to_t_float, init_t_params
+from utils import to_floatX, init_t_params
 
 
 def _concat(prefix, name):
@@ -105,18 +105,13 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, i
         params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,), config.floatX)
         init_t_params(params, t_params)
 
-    if one_step:
-        n_steps = 1
-        n_samples = state_in.shape[0]
-    else:
-        n_steps, n_samples, _ = state_in.shape
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
     if init_h is None:
-        init_h = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
+        init_h = tensor.alloc(to_floatX(0.), state_in.shape[-2], n_dim_out)
     if one_step:
         return _step(mask, state_in, init_h)
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps=n_steps, name=_concat(prefix, '_scan'))
+        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps=state_in.shape[0], name=_concat(prefix, '_scan'))
         return rval
 
 
@@ -145,17 +140,12 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
         params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,), config.floatX)
         init_t_params(params, t_params)
 
-    if one_step:
-        n_steps = 1
-        n_samples = state_in.shape[0]
-    else:
-        n_steps, n_samples, _ = state_in.shape
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
     if init_h is None:
-        init_h = tensor.alloc(to_t_float(0.), n_samples, n_dim_out)
+        init_h = tensor.alloc(to_floatX(0.), state_in.shape[-2], n_dim_out)
     if one_step:
-        rval, _ = _step(mask, state_in, init_h, tensor.alloc(to_t_float(0.), n_samples, n_dim_out))
+        rval, _ = _step(mask, state_in, init_h, tensor.zeros_like(init_h))
         return rval
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], [init_h, tensor.alloc(to_t_float(0.), n_samples, n_dim_out)], n_steps=n_steps, name=_concat(prefix, '_scan'))
+        rval, _ = theano.scan(_step, [mask, state_in], [init_h, tensor.zeros_like(init_h)], n_steps=state_in.shape[0], name=_concat(prefix, '_scan'))
         return rval[0]

@@ -9,7 +9,7 @@ import theano
 from theano import config
 
 
-def to_t_float(data):
+def to_floatX(data):
     '''
     Convert given data to float format used by Theano
     '''

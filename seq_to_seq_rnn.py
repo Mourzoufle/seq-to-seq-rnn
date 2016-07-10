@@ -15,7 +15,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from layers import dropout, dense, embedding, gru
 from optimizers import rmsprop
-from utils import to_t_float, init_t_params, params_zip, params_unzip
+from utils import to_floatX, init_t_params, params_zip, params_unzip
 
 
 SEED = 65535
@@ -76,7 +76,7 @@ def load_batch(samples, batch, mat):
         mask_y[i].extend([0] * (max_len_y - len(mask_y[i])))
     x = mat[numpy.asarray(x).flatten()].reshape(n_samples, max_len_x, mat.shape[-1])
 
-    return numpy.swapaxes(to_t_float(x), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int32').T, numpy.asarray(mask_y, 'int8').T
+    return numpy.swapaxes(to_floatX(x), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int32').T, numpy.asarray(mask_y, 'int8').T
 
 
 def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer):
@@ -103,7 +103,7 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     # Decoder(s)
     dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h)
     # Add dropout to the output of the final decoder
-    dec = dropout(dec, to_t_float(1.), trng)
+    dec = dropout(dec, to_floatX(1.), trng)
     # Classifier
     dec = dense(dec, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec.reshape((n_steps * n_samples, n_dim_vocab)))
@@ -123,9 +123,8 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
     y = tensor.vector('y', 'int32')
     enc = tensor.matrix('enc', config.floatX)
     init_h = tensor.matrix('init_h', config.floatX)
-    n_samples = y.shape[0]
     # Word embedding
-    emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
+    emb = tensor.switch(y[:, None] < 0, tensor.zeros((y.shape[0], n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
     next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h)
     # Classifier
@@ -136,7 +135,7 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
     return f_dec
 
 
-def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
+def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len):
     '''
     Sample words using beam search and compute the prediction error
     '''
@@ -147,14 +146,14 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
         enc, init_h = f_enc(x, mask_x)
 
         n_samples = x.shape[1]
-        hypo_sents = numpy.zeros((size_beam, n_samples, max_len), 'int32')
-        hypo_scores = numpy.zeros((size_beam, n_samples), config.floatX)
-        hypo_states = numpy.zeros((size_beam, n_samples, init_h.shape[-1]), config.floatX)
+        hypo_sents = numpy.zeros((beam_size, n_samples, max_len), 'int32')
+        hypo_scores = numpy.zeros((beam_size, n_samples), config.floatX)
+        hypo_states = numpy.zeros((beam_size, n_samples, init_h.shape[-1]), config.floatX)
 
         # First step - No embedded word is fed into the decoder
         hypo_words = numpy.asarray([-1] * n_samples, 'int32')
         dec, init_h = f_dec(hypo_words, enc, init_h)
-        for i in range(size_beam):
+        for i in range(beam_size):
             words = dec.argmax(-1)
             hypo_sents[i, :, 0] = words
             hypo_scores[i] = numpy.log(dec[numpy.arange(n_samples), words] + 1e-6)
@@ -166,17 +165,16 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
             scores = [[]] * n_samples
             states = [[]] * n_samples
             gen_hypos = numpy.asarray([False] * n_samples)
-            for j in range(size_beam):
+            for j in range(beam_size):
                 hypo_words = hypo_sents[j, :, i - 1]
                 dec, init_h = f_dec(hypo_words, enc, hypo_states[j])
                 for k in range(n_samples):
                     if hypo_words[k] > 0:
                         gen_hypos[k] = True
-                        for _ in range(size_beam):
+                        for _ in range(beam_size):
                             word = dec[k].argmax()
-                            sent = hypo_sents[j, k].copy()
-                            sent[i] = word
-                            sents[k].append(sent)
+                            hypo_sents[j, k, i] = word
+                            sents[k].append(hypo_sents[j, k].copy())
                             scores[k].append(hypo_scores[j, k] + numpy.log(dec[k, word] + 1e-6))
                             states[k].append(init_h[k])
                             dec[k, word] = 0
@@ -188,18 +186,18 @@ def get_err(f_enc, f_dec, samples, batches, mat, size_beam, max_len):
             for j in range(n_samples):
                 if not gen_hypos[j]:
                     continue
-                indices = numpy.argsort(hypo_scores[:, j])[: : -1]
-                for k in range(size_beam):
-                    hypo_sents[k, j] = sents[j][indices[k]]
-                    hypo_scores[k, j] = scores[j][indices[k]]
-                    hypo_states[k, j] = states[j][indices[k]]
+                for k in range(beam_size):
+                    idx = numpy.argmax(scores[j])
+                    hypo_sents[k, j] = sents[j][idx]
+                    hypo_scores[k, j] = scores[j][idx]
+                    hypo_states[k, j] = states[j][idx]
+                    del sents[j][idx], scores[j][idx], states[j][idx]
             if not gen_hypos.any():
                 break
 
         hypo_sents = hypo_sents[hypo_scores.argmax(0), numpy.arange(n_samples)]
         for i in range(n_samples):
-            cur_len = (hypo_sents[i] > 0).sum()
-            preds.append(hypo_sents[i, : cur_len].tolist())
+            preds.append(hypo_sents[i, : (hypo_sents[i] > 0).sum() + 1].tolist())
         y = numpy.concatenate([y, numpy.zeros((max_len - len(y), n_samples), 'int32')]).T
         mask_y = numpy.concatenate([mask_y, numpy.zeros((max_len - len(mask_y), n_samples), 'int32')]).T
         errs.extend(((hypo_sents != y) * mask_y * 1.).sum(1) / mask_y.sum(1))
@@ -228,8 +226,9 @@ def main_model(
     optimizer=rmsprop,                      # [sgd|adam|adadelta|rmsprop], sgd not recommanded
     lrate=0.0002,                           # Learning rate for optimizer
     max_epochs=1000,                        # Maximum number of epoch to run
-    patience=10,                            # Number of epoch to wait before early stop if no progress
-    size_beam=10,                           # number of candidate(s) in beam search
+    patience=20,                            # Number of epoch to wait before early stop if no progress
+    max_err_valid=0.75,                     # Max accepted error in validation, error above this threshold will cause NO early stop
+    beam_size=10,                           # number of candidate(s) in beam search
     # Save & Load
     path_load=None,                         # Path to load a previouly trained model
     path_save='model.npy',                  # Path to save the best model
@@ -272,11 +271,11 @@ def main_model(
     f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab)
 
     print('Training...')
+    time_start = time.time()
     history_errs = []
     best_p = None
     bad_count = 0
     stop = False
-    time_start = time.time()
     n_epochs = 0
     n_batches = 0
     while n_epochs < max_epochs:
@@ -299,19 +298,18 @@ def main_model(
 
             if numpy.mod(idx_batch, freq_val) == 0:
                 print('Validating...')
-                _, err_train = get_err(f_enc, f_dec, samples_train, batches_train[idx_batch - freq_val: idx_batch], mat_train, size_beam, max_len)
-                _, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, size_beam, max_len)
-                _, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, size_beam, max_len)
-                history_errs.append([err_val, err_test])
+                _, err_train = get_err(f_enc, f_dec, samples_train, batches_train[idx_batch - freq_val: idx_batch], mat_train, beam_size, max_len)
+                _, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, beam_size, max_len)
+                _, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, beam_size, max_len)
+                print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
 
-                if (best_p is None or err_val <= numpy.array(history_errs)[:, 0].min()):
+                history_errs.append([err_val, err_test])
+                if best_p is None or err_val <= numpy.array(history_errs)[:, 0].min():
                     best_p = params_unzip(t_params)
                     bad_count = 0
-
-                print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
-                if len(history_errs) > patience and err_val >= numpy.array(history_errs)[: -patience, 0].min():
+                elif n_epochs > 1:
                     bad_count += 1
-                    if bad_count > patience:
+                    if bad_count > patience and err_val < max_err_valid:
                         print('WARNING: early stop!')
                         stop = True
                         break
@@ -337,9 +335,9 @@ def main_model(
         best_p = params_unzip(t_params)
 
     print('Final predicting...')
-    preds_train, err_train = get_err(f_enc, f_dec, samples_train, get_batches(len(samples_train), batch_size_test), mat_train, size_beam, max_len)
-    preds_val, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, size_beam, max_len)
-    preds_test, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, size_beam, max_len)
+    preds_train, err_train = get_err(f_enc, f_dec, samples_train, get_batches(len(samples_train), batch_size_test), mat_train, beam_size, max_len)
+    preds_val, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, beam_size, max_len)
+    preds_test, err_test = get_err(f_enc, f_dec, samples_test, batches_test, mat_test, beam_size, max_len)
     print('ERR_TRA: %.6f    ERR_VAL: %.6f    ERR_TES: %.6f' % (err_train, err_val, err_test))
 
     if path_save:
@@ -359,5 +357,5 @@ def main_model(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=100, size_beam=2, path_save=None)
+    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=10, beam_size=2, path_save=None)
     main_model()
