@@ -15,7 +15,7 @@ from theano.sandbox.rng_mrg import MRG_RandomStreams
 
 from layers import dropout, dense, embedding, gru
 from optimizers import rmsprop
-from utils import to_floatX, init_t_params, params_zip, params_unzip
+from utils import to_floatX, params_zip, params_unzip
 
 
 SEED = 65535
@@ -186,12 +186,11 @@ def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len):
             for j in range(n_samples):
                 if not gen_hypos[j]:
                     continue
+                indices = numpy.argsort(scores[j])[: -beam_size - 1: -1]
                 for k in range(beam_size):
-                    idx = numpy.argmax(scores[j])
-                    hypo_sents[k, j] = sents[j][idx]
-                    hypo_scores[k, j] = scores[j][idx]
-                    hypo_states[k, j] = states[j][idx]
-                    del sents[j][idx], scores[j][idx], states[j][idx]
+                    hypo_sents[k, j] = sents[j][indices[k]]
+                    hypo_scores[k, j] = scores[j][indices[k]]
+                    hypo_states[k, j] = states[j][indices[k]]
             if not gen_hypos.any():
                 break
 
@@ -263,12 +262,14 @@ def main_model(
     print('\ttesting:    %6d samples' % len(samples_test))
 
     t_params = OrderedDict()
-    if path_load:
-        init_t_params(numpy.load(path_load), t_params)
     print('Building model...')
     f_enc, f_cost, f_update = build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer)
     print('Building word sampler...')
     f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab)
+    if path_load:
+        params = numpy.load(path_load)
+        for key in t_params.keys():
+            t_params[key].set_value(params[key])
 
     print('Training...')
     time_start = time.time()
@@ -357,5 +358,5 @@ def main_model(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=10, beam_size=2, path_save=None)
-    main_model()
+    main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=10, beam_size=2, path_save=None)
+    # main_model()
