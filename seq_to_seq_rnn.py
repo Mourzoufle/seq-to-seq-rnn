@@ -116,21 +116,31 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     return f_enc, f_cost, f_update
 
 
-def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
+def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size):
     '''
     Build word sampler for validation / testing
     '''
+    def _step(_p):
+        _y = _p.argmax(-1)
+        _s = tensor.log(_p[tensor.arange(_y.shape[0]), _y] + 1e-6)
+        tensor.set_subtensor(_p[tensor.arange(_y.shape[0]), _y], 0)
+
+        return _y, _s
+
     y = tensor.vector('y', 'int32')
     enc = tensor.matrix('enc', config.floatX)
     init_h = tensor.matrix('init_h', config.floatX)
+    n_samples = y.shape[0]
     # Word embedding
-    emb = tensor.switch(y[:, None] < 0, tensor.zeros((y.shape[0], n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
+    emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
     next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h)
     # Classifier
     dec = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec)
-    f_dec = theano.function([y, enc, init_h], [dec, next_h], name='f_dec')
+    # Hypo words
+    [next_y, next_scores], _ = theano.scan(_step, non_sequences=dec, n_steps=beam_size)
+    f_dec = theano.function([y, enc, init_h], [next_y, next_scores, next_h], name='f_dec')
 
     return f_dec
 
@@ -146,60 +156,54 @@ def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len):
         enc, init_h = f_enc(x, mask_x)
 
         n_samples = x.shape[1]
-        hypo_sents = numpy.zeros((beam_size, n_samples, max_len), 'int32')
-        hypo_scores = numpy.zeros((beam_size, n_samples), config.floatX)
-        hypo_states = numpy.zeros((beam_size, n_samples, init_h.shape[-1]), config.floatX)
+        prev_sents = numpy.zeros((beam_size, n_samples, max_len), 'int32')
 
         # First step - No embedded word is fed into the decoder
-        hypo_words = numpy.asarray([-1] * n_samples, 'int32')
-        dec, init_h = f_dec(hypo_words, enc, init_h)
-        for i in range(beam_size):
-            words = dec.argmax(-1)
-            hypo_sents[i, :, 0] = words
-            hypo_scores[i] = numpy.log(dec[numpy.arange(n_samples), words] + 1e-6)
-            dec[numpy.arange(n_samples), words] = 0
-            hypo_states[i] = init_h
+        prev_words = numpy.asarray([-1] * n_samples, 'int32')
+        prev_sents[:, :, 0], prev_scores, next_h = f_dec(prev_words, enc, init_h)
+        prev_h = next_h.repeat(beam_size, 0).reshape((beam_size, n_samples, init_h.shape[-1]))
 
         for i in range(1, max_len - 1):
-            sents = [[]] * n_samples
-            scores = [[]] * n_samples
-            states = [[]] * n_samples
+            hypo_sents = [[]] * n_samples
+            hypo_scores = [[]] * n_samples
+            hypo_h = [[]] * n_samples
             gen_hypos = numpy.asarray([False] * n_samples)
             for j in range(beam_size):
-                hypo_words = hypo_sents[j, :, i - 1]
-                dec, init_h = f_dec(hypo_words, enc, hypo_states[j])
+                prev_words = prev_sents[j, :, i - 1]
+                if not prev_words.any():
+                    continue
+                next_words, next_scores, next_h = f_dec(prev_words, enc, prev_h[j])
+                next_sents = prev_sents[j].reshape((1, n_samples, max_len)).repeat(beam_size, 0)
+                next_sents[:, :, i] = next_words
+                next_scores += prev_scores[j].reshape((1, n_samples)).repeat(beam_size, 0)
                 for k in range(n_samples):
-                    if hypo_words[k] > 0:
+                    if prev_words[k] > 0:
                         gen_hypos[k] = True
-                        for _ in range(beam_size):
-                            word = dec[k].argmax()
-                            hypo_sents[j, k, i] = word
-                            sents[k].append(hypo_sents[j, k].copy())
-                            scores[k].append(hypo_scores[j, k] + numpy.log(dec[k, word] + 1e-6))
-                            states[k].append(init_h[k])
-                            dec[k, word] = 0
+                        hypo_sents[k].extend(next_sents[:, k])
+                        hypo_scores[k].extend(next_scores[:, k])
+                        hypo_h[k].extend([next_h[k]] * beam_size)
                     else:
-                        sents[k].append(hypo_sents[j, k].copy())
-                        scores[k].append(hypo_scores[j, k])
-                        states[k].append(hypo_states[j, k].copy())
+                        hypo_sents[k].append(prev_sents[j, k].copy())
+                        hypo_scores[k].append(prev_scores[j, k])
+                        hypo_h[k].append(prev_h[j, k].copy())
 
             for j in range(n_samples):
                 if not gen_hypos[j]:
                     continue
-                indices = numpy.argsort(scores[j])[: -beam_size - 1: -1]
+                indices = numpy.argsort(hypo_scores[j])[: -beam_size - 1: -1]
                 for k in range(beam_size):
-                    hypo_sents[k, j] = sents[j][indices[k]]
-                    hypo_scores[k, j] = scores[j][indices[k]]
-                    hypo_states[k, j] = states[j][indices[k]]
+                    prev_sents[k, j] = hypo_sents[j][indices[k]]
+                    prev_scores[k, j] = hypo_scores[j][indices[k]]
+                    prev_h[k, j] = hypo_h[j][indices[k]]
             if not gen_hypos.any():
                 break
 
-        hypo_sents = hypo_sents[hypo_scores.argmax(0), numpy.arange(n_samples)]
+        sents = prev_sents[prev_scores.argmax(0), numpy.arange(n_samples)]
         for i in range(n_samples):
-            preds.append(hypo_sents[i, : (hypo_sents[i] > 0).sum() + 1].tolist())
+            preds.append(sents[i, : (sents[i] > 0).sum() + 1].tolist())
         y = numpy.concatenate([y, numpy.zeros((max_len - len(y), n_samples), 'int32')]).T
         mask_y = numpy.concatenate([mask_y, numpy.zeros((max_len - len(mask_y), n_samples), 'int32')]).T
-        errs.extend(((hypo_sents != y) * mask_y * 1.).sum(1) / mask_y.sum(1))
+        errs.extend(((sents != y) * mask_y * 1.).sum(1) / mask_y.sum(1))
 
     return preds, numpy.mean(errs)
 
@@ -265,7 +269,7 @@ def main_model(
     print('Building model...')
     f_enc, f_cost, f_update = build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer)
     print('Building word sampler...')
-    f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab)
+    f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size)
     if path_load:
         params = numpy.load(path_load)
         for key in t_params.keys():
@@ -358,5 +362,5 @@ def main_model(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=10, beam_size=2, path_save=None)
-    # main_model()
+    # main_model(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=50, max_epochs=10, beam_size=2, path_save=None)
+    main_model()
