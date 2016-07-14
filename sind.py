@@ -36,10 +36,12 @@ def pre_process(path_txt, path_img, path_out, vocab):
         json.dump(zip(items_img, items_txt), file_out)
 
 
-if __name__ == '__main__':
+def main(path_dict):
+    '''
+    The main function
+    '''
     vocab = {}
-    # currently use words whose frequencies are not lower than 10
-    with open('dict_10.txt', 'r') as file_in:
+    with open(path_dict, 'r') as file_in:
         words = file_in.readlines()
         for word in words:
             idx = len(vocab) + 1
@@ -48,3 +50,8 @@ if __name__ == '__main__':
     pre_process('train.SIS.json', 'train_img.json', 'train.json', vocab)
     pre_process('val.SIS.json', 'val_img.json', 'val.json', vocab)
     pre_process('test.SIS.json', 'test_img.json', 'test.json', vocab)
+
+
+if __name__ == '__main__':
+    # currently use words whose frequencies are not lower than 10
+    main('dict_10.txt')
