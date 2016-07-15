@@ -49,23 +49,43 @@ class ProgressBar(object):
     A General progress bar to display information
     '''
 
-    def __init__(self, max_items, max_size, header='', char='>'):
-        self.max_items = max_items  # Total number of items to be processed
-        self.max_size = max_size    # Max size of the progress bar - Total number of characters and spaces
-        self.header = header        # Header of the progress bar
-        self.char = char            # Character indicating the current progress
-        self.threshold = 1          # Threshold to trigger the progress bar to be redrawn
+    def __init__(self, max_items, max_size, header='', char='#'):
+        self.__max_items = max_items    # Total number of items to be processed
+        self.__max_size = max_size      # Max size of the progress bar - Total number of characters and spaces
+        self.__header = header          # Header of the progress bar
+        self.__char = char              # Character indicating the current progress
+        self.__threshold = 1            # Threshold to trigger the progress bar to be redrawn
+        self.__is_paused = True         # Flag indicating if the current progress is paused and has printed \n
+        self.__is_finished = False      # Flag indicating if the current progress us already finished
 
 
     def disp(self, items, tag=''):
         '''
         Display the current progress according to the given items
         '''
-        if len(items) < self.threshold:
+        if self.__is_finished:
             return
-        size = len(items) * self.max_size / self.max_items
-        stdout.write('\r%s\t%6d%% [%s%s] %s:\t%f' % (self.header, size * 100 / self.max_size, self.char * size, ' ' * (self.max_size - size), tag, numpy.mean(items)))
-        if len(items) == self.max_items:
+
+        if not self.__is_paused and len(items) < self.__threshold:
+            return
+
+        self.__is_paused = False
+        size = len(items) * self.__max_size / self.__max_items
+        stdout.write('\r%s %3d%% |%s%s| %s: %f' % (self.__header, size * 100 / self.__max_size, self.__char * size, ' ' * (self.__max_size - size), tag, numpy.mean(items)))
+
+        if len(items) == self.__max_items:
+            self.__is_paused = True
+            self.__is_finished = True
             stdout.write('\n')
             return
-        self.threshold = min(self.threshold + int(self.max_items * 1. / self.max_size + 0.5), self.max_items)
+
+        self.__threshold = min(self.__threshold + int(self.__max_items * 1. / self.__max_size + 0.5), self.__max_items)
+
+
+    def pause(self):
+        '''
+        Pause the progress bar
+        '''
+        if not self.__is_paused:
+            self.__is_paused = True
+            stdout.write('\n')

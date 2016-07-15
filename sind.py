@@ -38,7 +38,7 @@ def pre_process(path_txt, path_img, path_out, vocab):
 
 def main(path_dict):
     '''
-    The main function
+    Main function
     '''
     vocab = {}
     with open(path_dict, 'r') as file_in:

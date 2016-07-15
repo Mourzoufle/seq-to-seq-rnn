@@ -40,21 +40,21 @@ def ortho_weight(n_dim_in, n_dim_out, scale=0.01):
     '''
     Initialize the weights - Use a group of orthogonal vectors after SVD factorization
     '''
-    u, _, v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), False)
+    mat_u, _, mat_v = numpy.linalg.svd(scale * numpy.random.randn(n_dim_in, n_dim_out).astype(config.floatX), False)
     if n_dim_in >= n_dim_out:
-        return u
+        return mat_u
     else:
-        return v
+        return mat_v
 
 
-def dropout(state_in, use_dropout, trng=None, ratio=0.5):
+def dropout(state_in, use_dropout, t_rng=None, ratio=0.5):
     '''
     Dropout layer
     '''
-    if trng is None:
-        trng = MRG_RandomStreams()
+    if t_rng is None:
+        t_rng = MRG_RandomStreams()
 
-    return tensor.switch(use_dropout, state_in * trng.binomial(state_in.shape, p=1 - ratio, dtype=state_in.dtype), state_in * (1 - ratio))
+    return tensor.switch(use_dropout, state_in * t_rng.binomial(state_in.shape, p=1 - ratio, dtype=state_in.dtype), state_in * (1 - ratio))
 
 
 def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
@@ -86,17 +86,17 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, i
     '''
     Gated Recurrent Unit (GRU) layer
     '''
-    def _step(_m, _x, _h):
-        pre_act = tensor.dot(_h, t_params[_concat(prefix, 'U')])
+    def _step(_mask, _state_in, _prev_h):
+        _pre_act = tensor.dot(_prev_h, t_params[_concat(prefix, 'U')])
 
-        gate_r = tensor.nnet.sigmoid(_slice(pre_act, 0, n_dim_out) + _slice(_x, 0, n_dim_out))
-        gate_u = tensor.nnet.sigmoid(_slice(pre_act, 1, n_dim_out) + _slice(_x, 1, n_dim_out))
+        _gate_r = tensor.nnet.sigmoid(_slice(_pre_act, 0, n_dim_out) + _slice(_state_in, 0, n_dim_out))
+        _gate_u = tensor.nnet.sigmoid(_slice(_pre_act, 1, n_dim_out) + _slice(_state_in, 1, n_dim_out))
 
-        _h_new = tensor.tanh(gate_r * _slice(pre_act, 2, n_dim_out) + _slice(_x, 2, n_dim_out))
-        _h_new = (1. - gate_u) * _h + gate_u * _h_new
-        _h_new = _m[:, None] * _h_new + (1. - _m)[:, None] * _h
+        _next_h = tensor.tanh(_gate_r * _slice(_pre_act, 2, n_dim_out) + _slice(_state_in, 2, n_dim_out))
+        _next_h = (1. - _gate_u) * _prev_h + _gate_u * _next_h
+        _next_h = _mask[:, None] * _next_h + (1. - _mask)[:, None] * _prev_h
 
-        return _h_new
+        return _next_h
 
     if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
@@ -111,27 +111,27 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, i
     if one_step:
         return _step(mask, state_in, init_h)
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], init_h, n_steps=state_in.shape[0], name=_concat(prefix, '_scan'))
-        return rval
+        state_out, _ = theano.scan(_step, [mask, state_in], [init_h])
+        return state_out
 
 
 def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, init_h=None):
     '''
     Long Short-Term Memory (LSTM) layer
     '''
-    def _step(_m, _x, _h, _c):
-        pre_act = tensor.dot(_h, t_params[_concat(prefix, 'U')]) + _x
+    def _step(_mask, _state_in, _prev_h, _prev_c):
+        _pre_act = tensor.dot(_prev_h, t_params[_concat(prefix, 'U')]) + _state_in
 
-        gate_i = tensor.nnet.sigmoid(_slice(pre_act, 0, n_dim_out))
-        gate_f = tensor.nnet.sigmoid(_slice(pre_act, 1, n_dim_out))
-        gate_o = tensor.nnet.sigmoid(_slice(pre_act, 2, n_dim_out))
+        _gate_i = tensor.nnet.sigmoid(_slice(_pre_act, 0, n_dim_out))
+        _gate_f = tensor.nnet.sigmoid(_slice(_pre_act, 1, n_dim_out))
+        _gate_o = tensor.nnet.sigmoid(_slice(_pre_act, 2, n_dim_out))
 
-        _c_new = gate_f * _c + gate_i * tensor.tanh(_slice(pre_act, 3, n_dim_out))
-        _c_new = _m[:, None] * _c_new + (1. - _m)[:, None] * _c
-        _h_new = gate_o * tensor.tanh(_c_new)
-        _h_new = _m[:, None] * _h_new + (1. - _m)[:, None] * _h
+        _next_c = _gate_f * _prev_c + _gate_i * tensor.tanh(_slice(_pre_act, 3, n_dim_out))
+        _next_c = _mask[:, None] * _next_c + (1. - _mask)[:, None] * _prev_c
+        _next_h = _gate_o * tensor.tanh(_next_c)
+        _next_h = _mask[:, None] * _next_h + (1. - _mask)[:, None] * _prev_h
 
-        return _h_new, _c_new
+        return _next_h, _next_c
 
     if _concat(prefix, 'W') not in t_params:
         params = OrderedDict()
@@ -144,8 +144,8 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
     if init_h is None:
         init_h = tensor.alloc(to_floatX(0.), state_in.shape[-2], n_dim_out)
     if one_step:
-        rval, _ = _step(mask, state_in, init_h, tensor.zeros_like(init_h))
-        return rval
+        state_out, _ = _step(mask, state_in, init_h, tensor.zeros_like(init_h))
+        return state_out
     else:
-        rval, _ = theano.scan(_step, [mask, state_in], [init_h, tensor.zeros_like(init_h)], n_steps=state_in.shape[0], name=_concat(prefix, '_scan'))
-        return rval[0]
+        [state_out, _], _ = theano.scan(_step, [mask, state_in], [init_h, tensor.zeros_like(init_h)])
+        return state_out
