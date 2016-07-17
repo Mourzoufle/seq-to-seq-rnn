@@ -79,7 +79,7 @@ class ProgressBar(object):
             stdout.write('\n')
             return
 
-        self.__threshold = min(self.__threshold + int(self.__max_items * 1. / self.__max_size + 0.5), self.__max_items)
+        self.__threshold = min(int((self.__max_items - 1) * float(size + 1) / self.__max_size + 1), self.__max_items)
 
 
     def pause(self):

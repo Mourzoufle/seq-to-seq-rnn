@@ -77,7 +77,7 @@ def load_batch(samples, batch, mat):
     return numpy.swapaxes(to_floatX(x), 0, 1), numpy.asarray(mask_x, 'int8').T, numpy.asarray(y, 'int32').T, numpy.asarray(mask_y, 'int8').T
 
 
-def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer):
+def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_layer, optimizer):
     '''
     Build the whole model for training
     '''
@@ -86,11 +86,13 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
 
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
-    # Encoder(s)
-    enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc_1')[-1]
-    # Initialization of hidden layer
-    init_h = dense(enc, t_params, n_dim_enc, n_dim_dec, 'init_h')
-    init_h = tensor.tanh(init_h)
+    # Encoder(s) and initialization of hidden layer
+    enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc_1')
+    init_h = tensor.tanh(dense(enc[-1], t_params, n_dim_enc, n_dim_dec, 'init_h_1')).reshape((1, -1, n_dim_dec))
+    for i in range(1, n_layer):
+        enc = gru(mask_x, enc, t_params, n_dim_enc, n_dim_enc, 'enc_%d' % (i + 1))
+        init_h = tensor.concatenate([init_h, tensor.tanh(dense(enc[-1], t_params, n_dim_enc, n_dim_dec, 'init_h_%d' % (i + 1))).reshape((1, -1, n_dim_dec))])
+    enc = enc[-1]
     f_enc = theano.function([x, mask_x], [enc, init_h], name='f_enc')
 
     y = tensor.matrix('y', 'int32')
@@ -102,7 +104,9 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     emb = embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb').reshape((n_steps, n_samples, n_dim_txt))[1:]
     emb = tensor.concatenate([tensor.zeros((1, n_samples, n_dim_txt)), emb])
     # Decoder(s)
-    dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h)
+    dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h[0])
+    for i in range(1, n_layer):
+        dec = gru(mask_y, dec, t_params, n_dim_dec, n_dim_dec, 'dec_%d' % (i + 1), init_h=init_h[i])
     # Add dropout to the output of the final decoder
     dec = dropout(dec, to_floatX(1.), t_rng)
     # Classifier
@@ -117,7 +121,7 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     return f_enc, f_cost, f_update
 
 
-def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size):
+def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_layer, beam_size):
     '''
     Build word sampler for validation / testing
     '''
@@ -130,14 +134,16 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_s
 
     y = tensor.vector('y', 'int32')
     enc = tensor.matrix('enc', config.floatX)
-    init_h = tensor.matrix('init_h', config.floatX)
+    init_h = tensor.tensor3('init_h', config.floatX)
     n_samples = y.shape[0]
     # Word embedding
     emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
-    next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h)
+    next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h[0]).reshape((1, n_samples, n_dim_dec))
+    for i in range(1, n_layer):
+        next_h = tensor.concatenate([next_h, gru(tensor.ones_like(y, 'int8'), next_h[-1], t_params, n_dim_dec, n_dim_dec, 'dec_%d' % (i + 1), True, init_h[i]).reshape((1, n_samples, n_dim_dec))])
     # Classifier
-    dec = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
+    dec = dense(next_h[-1], t_params, n_dim_dec, n_dim_vocab, 'fc_1')
     dec = tensor.nnet.softmax(dec)
     # Hypo words
     [next_y, next_log_prob], _ = theano.scan(_step, non_sequences=dec, n_steps=beam_size)
@@ -148,7 +154,7 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_s
 
 def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
     '''
-    Sample words using beam search and compute the prediction error
+    Sample words and compute the prediction error
     '''
     preds = []
     errs = []
@@ -162,7 +168,7 @@ def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
         # First step - No embedded word is fed into the decoder
         prev_words = numpy.asarray([-1] * n_samples, 'int32')
         prev_sents[:, :, 0], prev_log_prob, prev_h = f_dec(prev_words, enc, init_h)
-        prev_h = numpy.tile(prev_h, (beam_size, 1, 1))
+        prev_h = numpy.tile(prev_h, (beam_size, 1, 1, 1))
 
         for i in range(1, max_len - 1):
             hypo_sents = [[]] * n_samples
@@ -182,11 +188,11 @@ def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
                         next_sents[:, i] = next_words[:, k]
                         hypo_sents[k].extend(next_sents)
                         hypo_log_prob[k].extend(next_log_prob[:, k] + prev_log_prob[j, k])
-                        hypo_h[k].extend([next_h[k]] * beam_size)
+                        hypo_h[k].extend([next_h[:, k]] * beam_size)
                     else:
                         hypo_sents[k].append(prev_sents[j, k].copy())
                         hypo_log_prob[k].append(prev_log_prob[j, k])
-                        hypo_h[k].append(prev_h[j, k].copy())
+                        hypo_h[k].append(prev_h[j, :, k].copy())
 
             if not has_hypos.any():
                 break
@@ -199,7 +205,7 @@ def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
                 for k in range(beam_size):
                     prev_sents[k, j] = hypo_sents[j][indices[k]]
                     prev_log_prob[k, j] = hypo_log_prob[j][indices[k]]
-                    prev_h[k, j] = hypo_h[j][indices[k]]
+                    prev_h[k, :, j] = hypo_h[j][indices[k]]
 
         sents = prev_sents[prev_log_prob.argmax(0), numpy.arange(n_samples)]
         for i in range(n_samples):
@@ -228,6 +234,7 @@ def main(
     n_dim_txt=300,                          # Dimension of word embedding
     n_dim_enc=256,                          # Number of hidden units in encoder
     n_dim_dec=512,                          # Number of hidden units in decoder
+    n_layer=4,                              # Number of the encoder and decoder layer(s)
     batch_size_train=64,                    # Batch size in training
     batch_size_test=256,                    # Batch size in validation / testing
     optimizer=rmsprop,                      # [sgd|adam|adadelta|rmsprop], sgd not recommanded
@@ -273,9 +280,9 @@ def main(
         init_t_params(numpy.load(path_load), t_params)
 
     print('Building model...')
-    f_enc, f_cost, f_update = build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, optimizer)
+    f_enc, f_cost, f_update = build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_layer, optimizer)
     print('Building word sampler...')
-    f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size)
+    f_dec = build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_layer, beam_size)
 
     print('Training...')
     time_start = time.time()
@@ -365,5 +372,5 @@ def main(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    # main(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=10, max_epochs=5, beam_size=10)
-    main()
+    main(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=10, max_epochs=5)
+    # main()
