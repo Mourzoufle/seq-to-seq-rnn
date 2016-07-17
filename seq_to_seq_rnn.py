@@ -11,9 +11,8 @@ from collections import OrderedDict
 import numpy
 import theano
 from theano import tensor, config
-from theano.sandbox.rng_mrg import MRG_RandomStreams
 
-from layers import dropout, dense, embedding, gru
+from layers import dense, embedding, gru
 from optimizers import rmsprop
 from utils import to_floatX, init_t_params, params_zip, params_unzip, ProgressBar
 
@@ -82,7 +81,6 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     Build the whole model for training
     '''
     numpy.random.seed(SEED)
-    t_rng = MRG_RandomStreams(SEED)
 
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
@@ -99,21 +97,23 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     mask_y = tensor.matrix('mask_y', 'int8')
     n_steps, n_samples = y.shape
     # Repetition of the final state of hidden layer
-    enc = tensor.repeat(enc.dimshuffle('x', 0, 1), n_steps, 0)
+    enc = tensor.tile(enc, (n_steps, 1, 1))
     # Word embedding
-    emb = embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb').reshape((n_steps, n_samples, n_dim_txt))[1:]
-    emb = tensor.concatenate([tensor.zeros((1, n_samples, n_dim_txt)), emb])
+    emb = embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb').reshape((n_steps, n_samples, n_dim_txt))[: -1]
+    emb = tensor.concatenate([tensor.zeros((1, n_samples, n_dim_txt), config.floatX), emb])
     # Decoder(s)
     dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', init_h=init_h[0])
     for i in range(1, n_layer):
         dec = gru(mask_y, dec, t_params, n_dim_dec, n_dim_dec, 'dec_%d' % (i + 1), init_h=init_h[i])
-    # Add dropout to the output of the final decoder
-    dec = dropout(dec, to_floatX(1.), t_rng)
+    # Full-connected layer
+    fc = dense(enc, t_params, n_dim_enc, n_dim_dec, 'fc_enc')
+    fc += dense(emb, t_params, n_dim_txt, n_dim_dec, 'fc_emb')
+    fc += dense(dec, t_params, n_dim_dec, n_dim_dec, 'fc_dec')
+    fc = dense(tensor.tanh(fc), t_params, n_dim_dec, n_dim_vocab, 'fc')
     # Classifier
-    dec = dense(dec, t_params, n_dim_dec, n_dim_vocab, 'fc_1')
-    dec = tensor.nnet.softmax(dec.reshape((n_steps * n_samples, n_dim_vocab)))
+    prob = tensor.nnet.softmax(fc.reshape((n_steps * n_samples, n_dim_vocab)))
     # Cost function
-    cost = dec[tensor.arange(n_steps * n_samples), y.flatten()].reshape((n_steps, n_samples))
+    cost = prob[tensor.arange(n_steps * n_samples), y.flatten()].reshape((n_steps, n_samples))
     cost = ((-tensor.log(cost + 1e-6) * mask_y).sum(0) / mask_y.astype(config.floatX).sum(0)).mean()
     grads = tensor.grad(cost, list(t_params.values()))
     f_cost, f_update = optimizer(tensor.scalar('lr'), t_params, grads, [x, mask_x, y, mask_y], cost)
@@ -142,11 +142,15 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_laye
     next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec_1', True, init_h[0]).reshape((1, n_samples, n_dim_dec))
     for i in range(1, n_layer):
         next_h = tensor.concatenate([next_h, gru(tensor.ones_like(y, 'int8'), next_h[-1], t_params, n_dim_dec, n_dim_dec, 'dec_%d' % (i + 1), True, init_h[i]).reshape((1, n_samples, n_dim_dec))])
+    # Full-connected layer
+    fc = dense(enc, t_params, n_dim_enc, n_dim_dec, 'fc_enc')
+    fc += dense(emb, t_params, n_dim_txt, n_dim_dec, 'fc_emb')
+    fc += dense(next_h[-1], t_params, n_dim_dec, n_dim_dec, 'fc_dec')
+    fc = dense(tensor.tanh(fc), t_params, n_dim_dec, n_dim_vocab, 'fc')
     # Classifier
-    dec = dense(next_h[-1], t_params, n_dim_dec, n_dim_vocab, 'fc_1')
-    dec = tensor.nnet.softmax(dec)
+    prob = tensor.nnet.softmax(fc)
     # Hypo words
-    [next_y, next_log_prob], _ = theano.scan(_step, non_sequences=dec, n_steps=beam_size)
+    [next_y, next_log_prob], _ = theano.scan(_step, non_sequences=prob, n_steps=beam_size)
     f_dec = theano.function([y, enc, init_h], [next_y, next_log_prob, next_h], name='f_dec')
 
     return f_dec
@@ -372,5 +376,5 @@ def main(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    main(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=10, max_epochs=5)
-    # main()
+    # main(max_samples_train=400, max_samples_val=50, max_samples_test=50, batch_size_train=50, batch_size_test=10, max_epochs=5)
+    main()
