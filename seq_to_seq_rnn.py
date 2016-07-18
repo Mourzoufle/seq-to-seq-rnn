@@ -36,15 +36,21 @@ def get_batches(n_samples, batch_size, shuffle=False):
     return batches
 
 
-def load_data(path_list, path_mat, n_dim_y):
+def load_data(path_data, path_mat, n_dim_y):
     '''
     Load dataset
     '''
-    with open(path_list, 'r') as file_in:
+    with open(path_data, 'r') as file_in:
         samples = json.load(file_in)
-        for i, _ in enumerate(samples):
-            samples[i][0] = samples[i][0][: : -1]
-            n_dim_y = max(n_dim_y, max(samples[i][1]) + 1)
+        for sample in samples:
+            sample[0] = sample[0][: : -1]
+            for idx, _ in enumerate(sample[1]):
+                sample[1][idx] = sample[1][idx][: -1]
+                if idx > 0:
+                    sample[1][0].extend(sample[1][idx])
+            sample[1] = sample[1][0]
+            sample[1].append(0)
+            n_dim_y = max(n_dim_y, max(sample[1]) + 1)
 
     return samples, numpy.load(path_mat), n_dim_y
 
@@ -156,6 +162,22 @@ def build_sampler(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_laye
     return f_dec
 
 
+def get_cost(f_cost, samples, batch, mat, costs, pgb, f_update=None, lrate=0.):
+    '''
+    Compute the cost of the given batches and update the parameters if it is necessary
+    '''
+    x, mask_x, y, mask_y = load_batch(samples, batch, mat)
+    costs.append(f_cost(x, mask_x, y, mask_y))
+    if f_update:
+        f_update(lrate)
+
+    if numpy.isnan(costs[-1]) or numpy.isinf(costs[-1]):
+        pgb.pause()
+        raise FloatingPointError, 'Bad cost detected!'
+
+    pgb.disp(costs, 'COST')
+
+
 def get_err(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
     '''
     Sample words and compute the prediction error
@@ -240,12 +262,11 @@ def main(
     n_dim_dec=512,                          # Number of hidden units in decoder
     n_layer=4,                              # Number of the encoder and decoder layer(s)
     batch_size_train=64,                    # Batch size in training
-    batch_size_test=256,                    # Batch size in validation / testing
+    batch_size_test=64,                     # Batch size in validation / testing
     optimizer=rmsprop,                      # [sgd|adam|adadelta|rmsprop], sgd not recommanded
     lrate=0.0002,                           # Learning rate for optimizer
     max_epochs=1000,                        # Maximum number of epoch to run
     patience=20,                            # Number of epoch to wait before early stop if no progress
-    max_err_valid=0.75,                     # Max accepted error in validation, error above this threshold will cause NO early stop
     beam_size=10,                           # number of candidate(s) in beam search
     # Frequency
     ratio_val=1.,                           # Validation frequency - Validate model after trained by this ratio of data
@@ -290,7 +311,7 @@ def main(
 
     print('Training...')
     time_start = time.time()
-    errs = []
+    costs = []
     best_p = None
     bad_count = 0
     stop = False
@@ -301,38 +322,33 @@ def main(
         batches_train = get_batches(len(samples_train), batch_size_train, True)
         next_val = ratio_val * len(batches_train)
         next_save = ratio_save * len(batches_train)
-        progress = ProgressBar(len(batches_train), 20, 'EPOCH %4d ' % n_epochs)
-        costs = []
-        for batch in batches_train:
-            x, mask_x, y, mask_y = load_batch(samples_train, batch, mat_train)
-            costs.append(f_cost(x, mask_x, y, mask_y))
-            f_update(lrate)
+        pgb_train = ProgressBar(len(batches_train), 20, 'EPOCH %4d ' % n_epochs)
+        costs_train = []
+        for batch_train in batches_train:
+            get_cost(f_cost, samples_train, batch_train, mat_train, costs_train, pgb_train, f_update, lrate)
 
-            if numpy.isnan(costs[-1]) or numpy.isinf(costs[-1]):
-                progress.pause()
-                print('ERROR: bad cost detected!')
-                return
-
-            progress.disp(costs, 'COST')
-
-            if len(costs) >= next_val:
+            if len(costs_train) >= next_val:
                 next_val = min(next_val + ratio_val * len(batches_train), len(batches_train))
-                progress.pause()
-                _, err = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, beam_size, max_len, 'VALIDATION ')
-                errs.append(err)
-                if best_p is None or err <= numpy.min(errs):
+                pgb_train.pause()
+                pgb_val = ProgressBar(len(batches_val), 20, 'VALIDATION ')
+                costs_val = []
+                for batch_val in batches_val:
+                    get_cost(f_cost, samples_val, batch_val, mat_val, costs_val, pgb_val)
+                costs.append(costs_val[-1])
+
+                if best_p is None or costs[-1] <= numpy.min(costs):
                     best_p = params_unzip(t_params)
                     bad_count = 0
                 elif n_epochs > 1:
                     bad_count += 1
-                    if bad_count > patience and err < max_err_valid:
+                    if bad_count > patience:
                         print('WARNING: early stop!')
                         stop = True
                         break
 
-            if len(costs) >= next_save and path_save:
+            if len(costs_train) >= next_save and path_save:
                 next_save = min(next_save + ratio_save * len(batches_train), len(batches_train))
-                progress.pause()
+                pgb_train.pause()
                 print('Saving model...')
                 if best_p is not None:
                     params = best_p
