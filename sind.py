@@ -6,52 +6,76 @@ import json
 import re
 
 
-def pre_process(path_txt, path_img, path_out, vocab):
-    '''
-    Pre-processing function to produce images-sentences pair in a subset of SIND
-    '''
-    items_txt = []
-    with open(path_txt, 'r') as file_in:
-        sents = json.load(file_in)['annotations']
-        for sent in sents:
-            item = []
-            tokens = re.split(' *', re.sub(r'[^a-z\[\]]', ' ', sent[0]['text']))
-            for token in tokens:
-                if token in vocab:
-                    item.append(vocab[token])
-            items_txt.append(item)
-
-    for i in range(0, len(items_txt), 5):
-        for j in range(1, 5):
-            items_txt[i].extend(items_txt[i + j])
-            items_txt[i + j] = []
-        items_txt[i].append(0)
-    items_txt = items_txt[: : 5]
-
-    items_img = []
-    with open(path_img, 'r') as file_in:
-        items_img = json.load(file_in)
-
-    with open(path_out, 'w') as file_out:
-        json.dump(zip(items_img, items_txt), file_out)
-
-
-def main(path_dict):
+def main(
+    threshold=10,   # Currently filter words with frequency lower than 10 - Treat them as UNK in the vocabulary
+    path_txt_train='train.SIS.json',
+    path_txt_val='val.SIS.json',
+    path_txt_test='test.SIS.json',
+    path_img_train='train_img.json',
+    path_img_val='val_img.json',
+    path_img_test='test_img.json',
+    path_vocab='vocab.json',
+    path_out_train='train.json',
+    path_out_val='val.json',
+    path_out_test='test.json',
+    ):
     '''
     Main function
     '''
-    vocab = {}
-    with open(path_dict, 'r') as file_in:
-        words = file_in.readlines()
-        for word in words:
-            idx = len(vocab) + 1
-            vocab[word.split('\t')[0]] = idx
+    paths_txt = [path_txt_train, path_txt_val, path_txt_test]
+    paths_img = [path_img_train, path_img_val, path_img_test]
+    paths_out = [path_out_train, path_out_val, path_out_test]
 
-    pre_process('train.SIS.json', 'train_img.json', 'train.json', vocab)
-    pre_process('val.SIS.json', 'val_img.json', 'val.json', vocab)
-    pre_process('test.SIS.json', 'test_img.json', 'test.json', vocab)
+    subs = [[r'[,.!?]', ' '], ['\'ll ', ' will '], ['\'d ', ' would '], ['\'n\'', ' and '], ['e\'s ', 'e is '], [' i\'m ', ' i am '], [' they\'re ', ' they are '], [r'[^a-z\[\]]', ' ']]
+    vocab = {}
+    sets_txt = []
+
+    for path in paths_txt:
+        sets_txt.append([])
+        with open(path, 'r') as file_in:
+            sents = json.load(file_in)['annotations']
+            for sent in sents:
+                sent = sent[0]['text']
+                for sub in subs:
+                    sent = re.sub(sub[0], sub[1], sent)
+                tokens = sent.split(' ')
+                sent = []
+                for token in tokens:
+                    if not token:
+                        continue
+                    sent.append(token)
+                    if token in vocab:
+                        vocab[token] += 1
+                    else:
+                        vocab[token] = 1
+                sets_txt[-1].append(sent)
+
+    idx = 1
+    for key in vocab.keys():
+        if vocab[key] < threshold:
+            del vocab[key]
+        else:
+            vocab[key] = idx
+            idx += 1
+    vocab['EOS'] = 0
+    vocab['UNK'] = idx
+    with open(path_vocab, 'w') as file_out:
+        json.dump(vocab, file_out)
+
+    for i, set_txt in enumerate(sets_txt):
+        for sent in set_txt:
+            for idx, token in enumerate(sent):
+                sent[idx] = vocab.get(token, idx)
+            sent.append(0)
+        for j in range(0, len(set_txt), 5):
+            set_txt[j] = [set_txt[j + k] for k in range(5)]
+        set_txt = set_txt[: : 5]
+
+        with open(paths_img[i], 'r') as file_in:
+            set_img = json.load(file_in)
+        with open(paths_out[i], 'w') as file_out:
+            json.dump(zip(set_img, set_txt), file_out)
 
 
 if __name__ == '__main__':
-    # currently use words whose frequencies are not lower than 10
-    main('dict_10.txt')
+    main()
