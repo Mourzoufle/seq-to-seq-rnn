@@ -44,13 +44,7 @@ def load_data(path_data, path_mat, n_dim_y):
         samples = json.load(file_in)
         for sample in samples:
             sample[0] = sample[0][: : -1]
-            for idx, _ in enumerate(sample[1]):
-                sample[1][idx] = sample[1][idx][: -1]
-                if idx > 0:
-                    sample[1][0].extend(sample[1][idx])
-            sample[1] = sample[1][0]
-            sample[1].append(0)
-            n_dim_y = max(n_dim_y, max(sample[1]) + 1)
+            n_dim_y = max(n_dim_y, max([max(sent) for sent in sample[1]]) + 1)
 
     return samples, numpy.load(path_mat), n_dim_y
 
@@ -266,7 +260,7 @@ def main(
     optimizer=rmsprop,                      # [sgd|adam|adadelta|rmsprop], sgd not recommanded
     lrate=0.0002,                           # Learning rate for optimizer
     max_epochs=1000,                        # Maximum number of epoch to run
-    patience=20,                            # Number of epoch to wait before early stop if no progress
+    patience=10,                            # Number of epoch to wait before early stop if no progress
     beam_size=10,                           # number of candidate(s) in beam search
     # Frequency
     ratio_val=1.,                           # Validation frequency - Validate model after trained by this ratio of data
@@ -301,8 +295,13 @@ def main(
     print('\ttesting:    %6d samples' % len(samples_test))
 
     t_params = OrderedDict()
+    best_params = None
+    costs = []
     if path_load:
-        init_t_params(numpy.load(path_load), t_params)
+        best_params = dict(numpy.load(path_load))
+        costs.append(best_params['best_cost'])
+        del best_params['best_cost']
+        init_t_params(best_params, t_params)
 
     print('Building model...')
     f_enc, f_cost, f_update = build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, n_layer, optimizer)
@@ -311,12 +310,10 @@ def main(
 
     print('Training...')
     time_start = time.time()
-    costs = []
-    best_p = None
-    bad_count = 0
-    stop = False
     batches_val = get_batches(len(samples_val), batch_size_test)
     n_epochs = 0
+    n_bad_costs = 0
+    n_stops = 0
     while n_epochs < max_epochs:
         n_epochs += 1
         batches_train = get_batches(len(samples_train), batch_size_train, True)
@@ -334,49 +331,47 @@ def main(
                 costs_val = []
                 for batch_val in batches_val:
                     get_cost(f_cost, samples_val, batch_val, mat_val, costs_val, pgb_val)
-                costs.append(costs_val[-1])
+                costs.append(numpy.mean(costs_val))
 
-                if best_p is None or costs[-1] <= numpy.min(costs):
-                    best_p = params_unzip(t_params)
-                    bad_count = 0
-                elif n_epochs > 1:
-                    bad_count += 1
-                    if bad_count > patience:
-                        print('WARNING: early stop!')
-                        stop = True
-                        break
+                if best_params is None or costs[-1] <= numpy.min(costs):
+                    best_params = params_unzip(t_params)
+                    n_bad_costs = 0
+                else:
+                    n_bad_costs += 1
+                    if n_bad_costs > patience:
+                        n_stops += 1
+                        print('WARNING: early stopfor %d time(s)!' % n_stops)
+                        params_zip(best_params, t_params)
+                        n_bad_costs = 0
 
             if len(costs_train) >= next_save and path_save:
                 next_save = min(next_save + ratio_save * len(batches_train), len(batches_train))
                 pgb_train.pause()
                 print('Saving model...')
-                if best_p is not None:
-                    params = best_p
+                if best_params is not None:
+                    params = best_params
                 else:
                     params = params_unzip(t_params)
-                numpy.savez(path_save, **params)
-
-        if stop:
-            break
+                numpy.savez(path_save, best_cost=numpy.min(costs), **params)
 
     time_end = time.time()
     print('Training finished')
     print('TIME: %9.3f sec    EPOCHS: %4d    SPEED: %9.3f sec/epoch' % (time_end - time_start, n_epochs, (time_end - time_start) / n_epochs))
 
-    if best_p is not None:
-        params_zip(best_p, t_params)
+    if best_params is not None:
+        params_zip(best_params, t_params)
     else:
-        best_p = params_unzip(t_params)
+        best_params = params_unzip(t_params)
 
     print('Final predicting...')
     preds_train, err_train = get_err(f_enc, f_dec, samples_train, get_batches(len(samples_train), batch_size_test), mat_train, beam_size, max_len, 'PREDICT TRA')
-    preds_val, err = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, beam_size, max_len, 'PREDICT VAL')
+    preds_val, err_val = get_err(f_enc, f_dec, samples_val, batches_val, mat_val, beam_size, max_len, 'PREDICT VAL')
     preds_test, err_test = get_err(f_enc, f_dec, samples_test, get_batches(len(samples_test), batch_size_test), mat_test, beam_size, max_len, 'PREDICT TES')
-    print('ERR TRA: %f    ERR VAL: %f    ERR TES: %f' % (err_train, err, err_test))
+    print('ERR TRA: %f    ERR VAL: %f    ERR TES: %f' % (err_train, err_val, err_test))
 
     print('Saving final model and output...')
     if path_save:
-        numpy.savez(path_save, **best_p)
+        numpy.savez(path_save, best_cost=numpy.min(costs), **best_params)
 
     with open(path_out_train, 'w') as file_out:
         json.dump(preds_train, file_out)
