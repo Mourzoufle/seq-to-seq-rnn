@@ -130,7 +130,7 @@ def rmsprop(lrate, t_params, grads, inputs, cost):
     cost: Theano variable
         Objective fucntion to minimize
 
-    NOTE: For more information, see Geoff Hinton. Neural Networks for Machine Learning, lecture 6a. http://cs.toronto.edu/~tijmen/csc321/slides/lecture_slides_lec6.pdf.
+    NOTE: For more information, see Geoff Hinton. Neural Networks for Machine Learning, lecture 6a. http://www.cs.toronto.edu/~tijmen/csc321/slides/lecture_slides_lec6.pdf.
     '''
 
     zipped_grads = [theano.shared(p.get_value() * to_floatX(0.), '%s_grad' % k) for k, p in t_params.iteritems()]
