@@ -65,7 +65,7 @@ def main(
     for i, set_txt in enumerate(sets_txt):
         for sent in set_txt:
             for idx, token in enumerate(sent):
-                sent[idx] = vocab.get(token, idx)
+                sent[idx] = vocab.get(token, vocab['UNK'])
             sent.append(0)
         for j in range(0, len(set_txt), 5):
             set_txt[j] = [set_txt[j + k] for k in range(5)]
