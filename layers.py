@@ -47,14 +47,11 @@ def ortho_weight(n_dim_in, n_dim_out, scale=0.01):
         return mat_v
 
 
-def dropout(state_in, use_dropout, t_rng=None, ratio=0.5):
+def dropout(state_in, ratio=0.5):
     '''
     Dropout layer
     '''
-    if t_rng is None:
-        t_rng = MRG_RandomStreams()
-
-    return tensor.switch(use_dropout, state_in * t_rng.binomial(state_in.shape, p=1 - ratio, dtype=state_in.dtype), state_in * (1 - ratio))
+    return state_in * MRG_RandomStreams().binomial(state_in.shape, p=1 - ratio, dtype=state_in.dtype)
 
 
 def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):

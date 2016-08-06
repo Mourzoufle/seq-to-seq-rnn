@@ -10,7 +10,7 @@ import numpy
 from theano import tensor, config
 
 from data import load_data, load_batch, get_batches
-from layers import dense, embedding, gru
+from layers import dropout, dense, embedding, gru
 from optimizers import adadelta
 from utils import init_t_params, params_zip, params_unzip, ProgressBar
 
@@ -22,21 +22,19 @@ def build_model(t_params, n_dim_img, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_voca
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
     # Encoder(s) and initialization of hidden layer
-    enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc')[-1]
+    enc = gru(mask_x, dropout(x), t_params, n_dim_img, n_dim_enc, 'enc')[-1]
     init_h = tensor.tanh(dense(enc, t_params, n_dim_enc, n_dim_dec, 'init_h'))
 
     y = tensor.matrix('y', 'int32')
     mask_y = tensor.matrix('mask_y', 'int8')
     n_steps, n_samples = y.shape
-    # Repetition of the final state of hidden layer
-    enc = tensor.tile(enc, (n_steps, 1, 1))
     # Word embedding
     emb = embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb').reshape((n_steps, n_samples, n_dim_txt))[: -1]
     emb = tensor.concatenate([tensor.zeros((1, n_samples, n_dim_txt), config.floatX), emb])
     # Decoder(s)
-    dec = gru(mask_y, tensor.concatenate([enc, emb], 2), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec', init_h=init_h)
+    dec = gru(mask_y, emb, t_params, n_dim_txt, n_dim_dec, 'dec', init_h=init_h)
     # Full-connected layer
-    fc = dense(tensor.concatenate([enc, emb, dec], 2), t_params, n_dim_enc + n_dim_txt + n_dim_dec, n_dim_vocab, 'fc')
+    fc = dense(dropout(dec), t_params, n_dim_dec, n_dim_vocab, 'fc')
     # Classifier
     prob = tensor.nnet.softmax(fc.reshape((n_steps * n_samples, n_dim_vocab)))
     # Cost function
@@ -74,9 +72,9 @@ def main(
     max_samples_val=0,                      # Max number of samples in validation set
     # Model Configuration
     n_dim_img=4096,                         # Dimension of image feature
-    n_dim_txt=300,                          # Dimension of word embedding
-    n_dim_enc=256,                          # Number of hidden units in encoder
-    n_dim_dec=512,                          # Number of hidden units in decoder
+    n_dim_txt=250,                          # Dimension of word embedding
+    n_dim_enc=1000,                         # Number of hidden units in encoder
+    n_dim_dec=1000,                         # Number of hidden units in decoder
     batch_size_train=64,                    # Batch size in training
     batch_size_test=64,                     # Batch size in validation
     optimizer=adadelta,                     # [sgd|adam|adadelta|rmsprop], sgd not recommanded
@@ -180,5 +178,5 @@ def main(
 
 if __name__ == '__main__':
     # For debugging, use the following arguments:
-    # main(max_samples_train=400, max_samples_val=50, batch_size_train=50, batch_size_test=10, max_epochs=5, ratio_val=2)
-    main(ratio_val=10, path_load='model.npz')
+    main(max_samples_train=400, max_samples_val=50, batch_size_train=50, batch_size_test=10, max_epochs=5, ratio_val=2)
+    # main()

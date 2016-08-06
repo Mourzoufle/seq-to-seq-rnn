@@ -22,10 +22,10 @@ def build_enc(t_params, n_dim_img, n_dim_enc, n_dim_dec):
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
     # Encoder(s) and initialization of hidden layer
-    enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc')[-1]
+    enc = gru(mask_x, 0.5 * x, t_params, n_dim_img, n_dim_enc, 'enc')[-1]
     init_h = tensor.tanh(dense(enc, t_params, n_dim_enc, n_dim_dec, 'init_h'))
 
-    return theano.function([x, mask_x], [enc, init_h], name='f_enc')
+    return theano.function([x, mask_x], [init_h], name='f_enc')
 
 
 def build_dec(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size):
@@ -40,21 +40,20 @@ def build_dec(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab, beam_size)
         return _y, _log_prob
 
     y = tensor.vector('y', 'int32')
-    enc = tensor.matrix('enc', config.floatX)
     init_h = tensor.matrix('init_h', config.floatX)
     n_samples = y.shape[0]
     # Word embedding
     emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
-    next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec', True, init_h)
+    next_h = gru(tensor.ones_like(y, 'int8'), emb, t_params, n_dim_txt, n_dim_dec, 'dec', True, init_h)
     # Full-connected layer
-    fc = dense(tensor.concatenate([enc, emb, next_h], 1), t_params, n_dim_enc + n_dim_txt + n_dim_dec, n_dim_vocab, 'fc')
+    fc = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc')
     # Classifier
     prob = tensor.nnet.softmax(fc)
     # Hypo words
     [next_y, next_log_prob], _ = theano.scan(_step, non_sequences=prob, n_steps=beam_size)
 
-    return theano.function([y, enc, init_h], [next_y, next_log_prob, next_h], name='f_dec')
+    return theano.function([y, init_h], [next_y, next_log_prob, next_h], name='f_dec')
 
 
 def predict(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
@@ -66,14 +65,14 @@ def predict(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
     progress = ProgressBar(numpy.sum([len(batch) for batch in batches]), 20, header)
     for batch in batches:
         x, mask_x, y, mask_y = load_batch(samples, batch, mat)
-        enc, init_h = f_enc(x, mask_x)
+        [init_h] = f_enc(x, mask_x)
 
         n_steps = mask_x.sum(0)
         n_samples = x.shape[1]
         prev_sents = numpy.zeros((beam_size, n_samples, max_len), 'int32')
         # First step - No embedded word is fed into the decoder
         prev_words = numpy.asarray([-1] * n_samples, 'int32')
-        prev_sents[:, :, 0], prev_log_prob, prev_h = f_dec(prev_words, enc, init_h)
+        prev_sents[:, :, 0], prev_log_prob, prev_h = f_dec(prev_words, init_h)
         prev_h = numpy.tile(prev_h, (beam_size, 1, 1))
         prev_n_ends = n_steps - (prev_sents[:, :, 0] == 0)
 
@@ -87,7 +86,7 @@ def predict(f_enc, f_dec, samples, batches, mat, beam_size, max_len, header):
                 if not prev_n_ends[j].any():
                     continue
 
-                next_words, next_log_prob, next_h = f_dec(prev_sents[j, :, i - 1], enc, prev_h[j])
+                next_words, next_log_prob, next_h = f_dec(prev_sents[j, :, i - 1], prev_h[j])
                 for k in range(n_samples):
                     if prev_n_ends[j, k] > 0:
                         has_hypos[k] = True
@@ -147,9 +146,9 @@ def main(
     max_samples_test=0,                     # Max number of samples in testing set
     # Model Configuration
     n_dim_img=4096,                         # Dimension of image feature
-    n_dim_txt=300,                          # Dimension of word embedding
-    n_dim_enc=256,                          # Number of hidden units in encoder
-    n_dim_dec=512,                          # Number of hidden units in decoder
+    n_dim_txt=250,                          # Dimension of word embedding
+    n_dim_enc=1000,                         # Number of hidden units in encoder
+    n_dim_dec=1000,                         # Number of hidden units in decoder
     batch_size=64,                          # Batch size
     beam_size=10,                           # number of candidate(s) in beam search
     # Save & Load

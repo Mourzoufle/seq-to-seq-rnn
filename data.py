@@ -17,7 +17,6 @@ def load_data(path_data, path_mat, n_dim_y, max_samples):
     with open(path_data, 'r') as file_in:
         samples = json.load(file_in)
         for sample in samples:
-            sample[0] = sample[0][: : -1]
             for i in range(1, len(sample[1])):
                 sample[1][0].extend(sample[1][i])
             sample[1] = sample[1][0]

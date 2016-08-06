@@ -7,7 +7,7 @@ import re
 
 
 def main(
-    threshold=10,   # Currently filter words with frequency lower than 10 - Treat them as UNK in the vocabulary
+    threshold=3,   # Currently filter words with frequency lower than 10 - Treat them as UNK in the vocabulary
     path_txt_train='train.SIS.json',
     path_txt_val='val.SIS.json',
     path_txt_test='test.SIS.json',

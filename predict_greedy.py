@@ -22,10 +22,10 @@ def build_enc(t_params, n_dim_img, n_dim_enc, n_dim_dec):
     x = tensor.tensor3('x', config.floatX)
     mask_x = tensor.matrix('mask_x', 'int8')
     # Encoder(s) and initialization of hidden layer
-    enc = gru(mask_x, x, t_params, n_dim_img, n_dim_enc, 'enc')[-1]
+    enc = gru(mask_x, 0.5 * x, t_params, n_dim_img, n_dim_enc, 'enc')[-1]
     init_h = tensor.tanh(dense(enc, t_params, n_dim_enc, n_dim_dec, 'init_h'))
 
-    return theano.function([x, mask_x], [enc, init_h], name='f_enc')
+    return theano.function([x, mask_x], [init_h], name='f_enc')
 
 
 def build_dec(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
@@ -33,19 +33,18 @@ def build_dec(t_params, n_dim_txt, n_dim_enc, n_dim_dec, n_dim_vocab):
     Build the decoder for texts
     '''
     y = tensor.vector('y', 'int32')
-    enc = tensor.matrix('enc', config.floatX)
-    init_h = tensor.matrix('init_h', config.floatX)
+    prev_h = tensor.matrix('init_h', config.floatX)
     n_samples = y.shape[0]
     # Word embedding
     emb = tensor.switch(y[:, None] < 0, tensor.zeros((n_samples, n_dim_txt), config.floatX), embedding(y, t_params, n_dim_vocab, n_dim_txt, 'emb'))
     # Decoder(s) - Initialization of hidden layer in the next step
-    next_h = gru(tensor.ones_like(y, 'int8'), tensor.concatenate([enc, emb], 1), t_params, n_dim_enc + n_dim_txt, n_dim_dec, 'dec', True, init_h)
+    next_h = gru(tensor.ones_like(y, 'int8'), emb, t_params, n_dim_txt, n_dim_dec, 'dec', True, prev_h)
     # Full-connected layer
-    fc = dense(tensor.concatenate([enc, emb, next_h], 1), t_params, n_dim_enc + n_dim_txt + n_dim_dec, n_dim_vocab, 'fc')
+    fc = dense(0.5 * next_h, t_params, n_dim_dec, n_dim_vocab, 'fc')
     # Classifier
     prob = tensor.nnet.softmax(fc)
 
-    return theano.function([y, enc, init_h], [prob.argmax(-1), next_h], name='f_dec')
+    return theano.function([y, prev_h], [prob.argmax(-1), next_h], name='f_dec')
 
 
 def predict(f_enc, f_dec, samples, batches, mat, max_len, header):
@@ -57,13 +56,13 @@ def predict(f_enc, f_dec, samples, batches, mat, max_len, header):
     progress = ProgressBar(numpy.sum([len(batch) for batch in batches]), 20, header)
     for batch in batches:
         x, mask_x, y, mask_y = load_batch(samples, batch, mat)
-        enc, init_h = f_enc(x, mask_x)
+        [prev_h] = f_enc(x, mask_x)
 
         n_steps = mask_x.sum(0)
         n_samples = x.shape[1]
         sents = numpy.zeros((n_samples, max_len), 'int32')
         # First step - No embedded word is fed into the decoder
-        sents[:, 0], init_h = f_dec(numpy.asarray([-1] * n_samples, 'int32'), enc, init_h)
+        sents[:, 0], prev_h = f_dec(numpy.asarray([-1] * n_samples, 'int32'), prev_h)
         n_ends = n_steps - (sents[:, 0] == 0)
 
         for i in range(1, max_len - 1):
@@ -71,9 +70,9 @@ def predict(f_enc, f_dec, samples, batches, mat, max_len, header):
             if not n_ends.any():
                 break
 
-            next_words, init_h = f_dec(prev_words, enc, init_h)
-            sents[:, i] = next_words * (prev_words > 0)
-            n_ends = n_ends - (next_words == 0) * (n_ends > 0)
+            next_words, prev_h = f_dec(prev_words, prev_h)
+            sents[:, i] = next_words * (n_ends > 0)
+            n_ends -= (next_words == 0) * (n_ends > 0)
 
         for i in range(n_samples):
             idx = 0
@@ -104,9 +103,9 @@ def main(
     max_samples_test=0,                     # Max number of samples in testing set
     # Model Configuration
     n_dim_img=4096,                         # Dimension of image feature
-    n_dim_txt=300,                          # Dimension of word embedding
-    n_dim_enc=256,                          # Number of hidden units in encoder
-    n_dim_dec=512,                          # Number of hidden units in decoder
+    n_dim_txt=250,                          # Dimension of word embedding
+    n_dim_enc=1000,                         # Number of hidden units in encoder
+    n_dim_dec=1000,                         # Number of hidden units in decoder
     batch_size=64,                          # Batch size
     # Save & Load
     path_load='model.npz',                  # Path to load a previouly trained model - Required
