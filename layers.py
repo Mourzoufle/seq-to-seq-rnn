@@ -1,4 +1,4 @@
-﻿'''
+'''
 Neural network layers
 '''
 
@@ -58,11 +58,10 @@ def dense(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Full-connected layer
     '''
-    if _concat(prefix, 'W') not in t_params:
-        params = OrderedDict()
-        params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
-        params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,), config.floatX)
-        init_t_params(params, t_params)
+    params = OrderedDict()
+    params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
+    params[_concat(prefix, 'b')] = numpy.zeros((n_dim_out,), config.floatX)
+    init_t_params(params, t_params)
 
     return tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')]
 
@@ -71,10 +70,9 @@ def embedding(state_in, t_params, n_dim_in, n_dim_out, prefix):
     '''
     Word embedding layer - Return a matrix that nay need to be reshaped
     '''
-    if _concat(prefix, 'W') not in t_params:
-        params = OrderedDict()
-        params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
-        init_t_params(params, t_params)
+    params = OrderedDict()
+    params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_out)
+    init_t_params(params, t_params)
 
     return t_params[_concat(prefix, 'W')][state_in.flatten()]
 
@@ -95,12 +93,11 @@ def gru(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, i
 
         return _next_h
 
-    if _concat(prefix, 'W') not in t_params:
-        params = OrderedDict()
-        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
-        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
-        params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,), config.floatX)
-        init_t_params(params, t_params)
+    params = OrderedDict()
+    params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
+    params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
+    params[_concat(prefix, 'b')] = numpy.zeros((3 * n_dim_out,), config.floatX)
+    init_t_params(params, t_params)
 
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
     if init_h is None:
@@ -130,12 +127,11 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
 
         return _next_h, _next_c
 
-    if _concat(prefix, 'W') not in t_params:
-        params = OrderedDict()
-        params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
-        params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
-        params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,), config.floatX)
-        init_t_params(params, t_params)
+    params = OrderedDict()
+    params[_concat(prefix, 'W')] = numpy.concatenate([ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out), ortho_weight(n_dim_in, n_dim_out)], 1)
+    params[_concat(prefix, 'U')] = numpy.concatenate([ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out), ortho_weight(n_dim_out, n_dim_out)], 1)
+    params[_concat(prefix, 'b')] = numpy.zeros((4 * n_dim_out,), config.floatX)
+    init_t_params(params, t_params)
 
     state_in = (tensor.dot(state_in, t_params[_concat(prefix, 'W')]) + t_params[_concat(prefix, 'b')])
     if init_h is None:
@@ -146,3 +142,30 @@ def lstm(mask, state_in, t_params, n_dim_in, n_dim_out, prefix, one_step=False, 
     else:
         [state_out, _], _ = theano.scan(_step, [mask, state_in], [init_h, tensor.zeros_like(init_h)])
         return state_out
+
+
+def context(state_in, t_params, indices, n_dim_in, prefix):
+    '''
+    Bilinear similarity layer
+    '''
+    def _step(_idx_img, _indices_img_ctx, _state_ctx):
+        def __step(__idx_box, __state_ctx):
+            __states_ctx = state_in[_indices_img_ctx].reshape((-1, n_dim_in))
+            __scores = tensor.dot(tensor.dot(state_in[_idx_img][__idx_box], t_params[_concat(prefix, 'W')]), __states_ctx.T)
+            __scores /= __scores.sum()
+            __state_ctx = (__scores * __states_ctx).sum(0)
+
+            return __state_ctx
+
+        _state_ctx, _ = theano.scan(__step, [tensor.arange(n_boxes)], [tensor.alloc(to_floatX(0.), n_dim_in)])
+        return _state_ctx
+
+    params = OrderedDict()
+    params[_concat(prefix, 'W')] = ortho_weight(n_dim_in, n_dim_in)
+    init_t_params(params, t_params)
+
+    n_steps, n_boxes, _ = state_in.shape
+
+    state_out, _ = theano.scan(_step, [theano.arange(n_steps), indices], [tensor.zeros_like(state_in)])
+
+    return state_out
